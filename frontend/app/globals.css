@@ -1,0 +1,180 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800;900&display=swap');
+
+:root {
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Outfit', sans-serif;
+
+  /* Premium HSL Dark Theme Palette */
+  --background: 224 25% 4%;
+  --foreground: 210 40% 98%;
+
+  --card: 224 25% 6%;
+  --card-foreground: 210 40% 98%;
+  --card-border: 224 20% 12%;
+
+  --popover: 224 25% 5%;
+  --popover-foreground: 210 40% 98%;
+
+  /* Vibrant Accents */
+  --primary: 250 85% 65%; /* Sleek Violet */
+  --primary-foreground: 210 40% 98%;
+  --primary-glow: hsla(250, 85%, 65%, 0.15);
+
+  --secondary: 190 95% 45%; /* High-tech Cyan */
+  --secondary-foreground: 224 25% 4%;
+
+  --accent: 320 85% 60%; /* Cyberpunk Magenta */
+  --accent-foreground: 210 40% 98%;
+
+  --muted: 224 15% 15%;
+  --muted-foreground: 215 20% 65%;
+
+  --success: 142 76% 45%;
+  --warning: 38 92% 50%;
+  --destructive: 0 84% 60%;
+
+  --border: 224 20% 12%;
+  --input: 224 20% 12%;
+  --ring: 250 85% 65%;
+
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Premium Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(var(--background));
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--card-border));
+  border-radius: 9999px;
+  border: 2px solid hsl(var(--background));
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--primary) / 0.4);
+}
+
+/* Glassmorphism Classes */
+.glass-panel {
+  background: rgba(10, 12, 22, 0.4);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+}
+
+.glass-panel-hover {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.glass-panel-hover:hover {
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 40px 0 rgba(110, 68, 255, 0.15);
+  transform: translateY(-2px);
+}
+
+.glow-text {
+  text-shadow: 0 0 20px hsla(250, 85%, 65%, 0.5);
+}
+
+/* Custom animations */
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 15px 0 hsla(250, 85%, 65%, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 30px 5px hsla(250, 85%, 65%, 0.4);
+  }
+}
+
+.animate-glow {
+  animation: pulse-glow 3s infinite ease-in-out;
+}
+
+/* Base styles for markdown content in deliverables */
+.prose {
+  line-height: 1.625;
+}
+
+.prose h1, .prose h2, .prose h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  color: hsl(var(--foreground));
+}
+
+.prose h1 {
+  font-size: 1.8rem;
+  border-bottom: 1px solid hsl(var(--border));
+  padding-bottom: 0.3em;
+}
+
+.prose h2 {
+  font-size: 1.4rem;
+}
+
+.prose h3 {
+  font-size: 1.15rem;
+}
+
+.prose p {
+  margin-bottom: 1em;
+  color: hsl(var(--muted-foreground));
+}
+
+.prose ul, .prose ol {
+  margin-left: 1.5em;
+  margin-bottom: 1em;
+  color: hsl(var(--muted-foreground));
+}
+
+.prose li {
+  margin-bottom: 0.25em;
+}
+
+.prose code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+  background: hsl(var(--muted));
+  padding: 0.2em 0.4em;
+  border-radius: 4px;
+  color: hsl(var(--secondary));
+}
+
+.prose pre {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  padding: 1em;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  margin-bottom: 1em;
+}
+
+.prose pre code {
+  background: transparent;
+  padding: 0;
+  color: hsl(var(--foreground));
+}

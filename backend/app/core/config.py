@@ -1,0 +1,46 @@
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+from typing import List
+
+
+class Settings(BaseSettings):
+    # App
+    app_name: str = "AIA Backend"
+    debug: bool = False
+
+    # Database
+    database_url: str = "postgresql+asyncpg://aia_user:aia_password@localhost:5432/aia_db"
+
+    # Security (JWT)
+    secret_key: str = "change-this-secret-key"
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 1440  # 24h
+
+    # Admin credentials (created on first run)
+    admin_username: str = "admin"
+    admin_password: str = "Admin@AIA2026!"
+
+    # Encryption key for API keys stored in DB (Fernet key)
+    encryption_key: str = ""
+
+    # LLM API keys (fallback from env if not set in DB)
+    gemini_api_key: str = ""
+    grok_api_key: str = ""
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
+    mistral_api_key: str = ""
+
+    # CORS
+    cors_origins: List[str] = ["http://localhost:3000"]
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
