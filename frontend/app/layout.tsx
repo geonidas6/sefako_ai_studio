@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { Navbar } from '@/components/navbar';
 
 export const metadata: Metadata = {
   title: 'AIA Studio — Agence IA Multi-Agents',
@@ -12,12 +13,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="fr">
+    <html lang="fr" className="dark">
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       </head>
-      <body>
-        {children}
+      <body className="min-h-screen bg-background text-foreground font-sans antialiased">
+        <Navbar />
+        <main className="flex-1">
+          {children}
+        </main>
       </body>
     </html>
   );

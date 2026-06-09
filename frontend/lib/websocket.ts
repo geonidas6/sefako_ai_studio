@@ -22,10 +22,12 @@ export function connectProjectWs(
   onError: (err: any) => void
 ): () => void {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // If we're on localhost, we assume backend is on port 8000
-  const host = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'localhost:8000'
-    : `${window.location.hostname}:8000`;
+  const apiDomain = process.env.NEXT_PUBLIC_API_DOMAIN;
+  const host = apiDomain || (
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? 'localhost:8000'
+      : `${window.location.hostname}:8000`
+  );
 
   const socket = new WebSocket(`${protocol}//${host}/ws/projects/${projectId}`);
 

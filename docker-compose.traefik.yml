@@ -1,0 +1,25 @@
+services:
+  backend:
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.sefako-ai-studio-backend.rule: Host(`api-sefako-ai-studio.it-sefako.com`)
+      traefik.http.routers.sefako-ai-studio-backend.entrypoints: websecure
+      traefik.http.routers.sefako-ai-studio-backend.tls.certresolver: myresolver
+      traefik.http.services.sefako-ai-studio-backend.loadbalancer.server.port: '8000'
+      traefik.docker.network: proxy_net
+    networks:
+    - default
+    - proxy_net
+  frontend:
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.sefako-ai-studio-frontend.rule: Host(`sefako-ai-studio.it-sefako.com`)
+      traefik.http.routers.sefako-ai-studio-frontend.entrypoints: websecure
+      traefik.http.routers.sefako-ai-studio-frontend.tls.certresolver: myresolver
+      traefik.http.services.sefako-ai-studio-frontend.loadbalancer.server.port: '3000'
+      traefik.docker.network: proxy_net
+    networks:
+    - proxy_net
+networks:
+  proxy_net:
+    external: true

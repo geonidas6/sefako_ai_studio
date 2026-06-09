@@ -3,7 +3,31 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { motion } from 'framer-motion';
+import { 
+  ShieldAlert, 
+  CheckCircle2, 
+  Settings, 
+  LogOut, 
+  Database, 
+  Cpu, 
+  TrendingUp, 
+  Palette, 
+  Settings2, 
+  ShieldCheck,
+  Brain,
+  ChevronLeft,
+  Key,
+  BarChart3,
+  Loader2,
+  ExternalLink,
+  Plus
+} from 'lucide-react';
 import { api } from '../../lib/api';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 
 interface ProviderConfig {
   provider: string;
@@ -21,6 +45,14 @@ interface CostSummary {
   tokens_used: number;
 }
 
+const providerKeyLinks: Record<string, string> = {
+  gemini: 'https://aistudio.google.com/app/apikey',
+  anthropic: 'https://console.anthropic.com/settings/keys',
+  openai: 'https://platform.openai.com/api-keys',
+  grok: 'https://console.x.ai/',
+  mistral: 'https://console.mistral.ai/api-keys',
+};
+
 export default function AdminDashboard() {
   const router = useRouter();
   const [configs, setConfigs] = useState<ProviderConfig[]>([]);
@@ -30,8 +62,9 @@ export default function AdminDashboard() {
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
-  // Local form state for API keys (so we don't save until click save)
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  const [newModels, setNewModels] = useState<Record<string, string>>({});
+  const [addingModel, setAddingModel] = useState<Record<string, boolean>>({});
   const [testingKey, setTestingKey] = useState<Record<string, boolean>>({});
   const [testResult, setTestResult] = useState<Record<string, { success: boolean; message: string }>>({});
 
@@ -52,13 +85,11 @@ export default function AdminDashboard() {
         setAssignments(assignmentsData);
         setCosts(costsData);
       } catch (err: any) {
-        console.error('Failed to load admin data:', err);
         setError(err.message || 'Impossible de charger les données.');
       } finally {
         setLoading(false);
       }
     }
-
     loadAdminData();
   }, [router]);
 
@@ -78,7 +109,6 @@ export default function AdminDashboard() {
         api_key: apiKey,
       });
 
-      // Refresh configs & costs
       const [newConfigs, newCosts] = await Promise.all([
         api.admin.getConfigs(),
         api.admin.getCosts(),
@@ -86,12 +116,8 @@ export default function AdminDashboard() {
       setConfigs(newConfigs);
       setCosts(newCosts);
 
-      // Clear key input after success
-      if (apiKey) {
-        setApiKeys({ ...apiKeys, [provider]: '' });
-      }
-
-      setSuccessMsg(`Configuration de ${provider} mise à jour avec succès.`);
+      if (apiKey) setApiKeys({ ...apiKeys, [provider]: '' });
+      setSuccessMsg(`Configuration de ${provider} mise à jour.`);
       setTimeout(() => setSuccessMsg(''), 4000);
     } catch (err: any) {
       setError(err.message || 'Erreur lors de la mise à jour.');
@@ -100,14 +126,8 @@ export default function AdminDashboard() {
 
   const handleTestConnection = async (provider: string, activeModel: string) => {
     const key = apiKeys[provider];
-    if (!key) {
-      alert('Veuillez saisir une clé API pour la tester.');
-      return;
-    }
-
+    if (!key) return;
     setTestingKey({ ...testingKey, [provider]: true });
-    setTestResult({ ...testResult, [provider]: undefined as any });
-
     try {
       const res = await api.admin.testConnection(provider, key, activeModel);
       setTestResult({
@@ -124,168 +144,169 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleAddModel = async (provider: string) => {
+    const model = (newModels[provider] || '').trim();
+    if (!model) return;
+    setError('');
+    setSuccessMsg('');
+    setAddingModel({ ...addingModel, [provider]: true });
+    try {
+      await api.admin.addModel(provider, model);
+      await api.admin.updateConfig(provider, {
+        is_enabled: configs.find(c => c.provider === provider)?.is_enabled || false,
+        active_model: model,
+      });
+      const newConfigs = await api.admin.getConfigs();
+      setConfigs(newConfigs);
+      setNewModels({ ...newModels, [provider]: '' });
+      setSuccessMsg(`Modèle "${model}" ajouté.`);
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setError(err.message || "Erreur lors de l'ajout du modèle.");
+    } finally {
+      setAddingModel({ ...addingModel, [provider]: false });
+    }
+  };
+
   const handleAssignmentChange = async (agent: string, provider: string) => {
     setError('');
     setSuccessMsg('');
     try {
       await api.admin.updateAssignment(agent, provider);
       setAssignments({ ...assignments, [agent]: provider });
-      setSuccessMsg(`Agent "${agent}" assigné à "${provider}" avec succès.`);
+      setSuccessMsg(`Agent "${agent}" assigné.`);
       setTimeout(() => setSuccessMsg(''), 4000);
     } catch (err: any) {
       setError(err.message || "Erreur lors de l'affectation.");
     }
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[#05070f] flex items-center justify-center text-muted-foreground">
-        Chargement de la console d'administration...
-      </div>
-    );
-  }
+  if (loading) return <div className="min-h-screen flex items-center justify-center"><BarChart3 className="h-8 w-8 animate-spin text-primary" /></div>;
 
   return (
-    <div className="min-h-screen bg-[#05070f] flex flex-col relative overflow-hidden">
-      {/* Glows */}
-      <div className="absolute top-[-20%] right-[-10%] w-[60%] h-[60%] rounded-full bg-violet-900/5 blur-[150px] pointer-events-none" />
-      <div className="absolute bottom-[-20%] left-[-10%] w-[60%] h-[60%] rounded-full bg-cyan-900/5 blur-[150px] pointer-events-none" />
-
-      {/* Header */}
-      <header className="w-full border-b border-white/5 bg-[#090b14]/50 backdrop-blur-md sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-          <div className="flex items-center gap-3">
-            <Link href="/" className="text-xl font-bold bg-gradient-to-r from-violet-400 via-fuchsia-400 to-cyan-400 bg-clip-text text-transparent font-display tracking-wider">
-              AIA STUDIO
-            </Link>
-            <span className="text-xs px-2.5 py-0.5 rounded-full border border-violet-500/30 bg-violet-950/20 text-violet-300 font-medium font-sans">
-              Admin console
-            </span>
-          </div>
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-xs text-muted-foreground hover:text-white transition-colors">
-              ← Retour à l'accueil
-            </Link>
-            <button
-              onClick={handleLogout}
-              className="text-xs bg-red-950/30 border border-red-500/20 hover:bg-red-900/20 text-red-400 px-3.5 py-2 rounded-lg font-medium transition-all"
-            >
-              Déconnexion
-            </button>
-          </div>
+    <div className="max-w-7xl mx-auto px-6 py-12 md:py-20 space-y-12">
+      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="flex justify-between items-end">
+        <div>
+          <h1 className="text-3xl font-bold font-display tracking-tight">Console d'Administration</h1>
+          <p className="text-muted-foreground mt-1">Configurez les cerveaux de votre agence multi-agents.</p>
         </div>
-      </header>
+        <Button variant="outline" size="sm" onClick={handleLogout} className="text-destructive hover:bg-destructive/10">
+          <LogOut className="mr-2 h-4 w-4" /> Déconnexion
+        </Button>
+      </motion.div>
 
-      {/* Container */}
-      <main className="flex-1 max-w-7xl mx-auto px-6 py-10 w-full z-10 space-y-10">
-        {/* Status Alerts */}
-        {error && (
-          <div className="p-4 rounded-xl bg-red-950/30 border border-red-500/20 text-red-400 text-sm font-medium">
-            ⚠️ {error}
-          </div>
-        )}
-        {successMsg && (
-          <div className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/20 text-emerald-400 text-sm font-medium">
-            ✅ {successMsg}
-          </div>
-        )}
+      {/* Status Alerts */}
+      {(error || successMsg) && (
+        <div className="fixed bottom-8 right-8 z-50 animate-in space-y-2">
+          {error && (
+            <Card className="bg-destructive/10 border-destructive/20 text-destructive p-4 flex items-center gap-3">
+              <ShieldAlert className="h-5 w-5" /> {error}
+            </Card>
+          )}
+          {successMsg && (
+            <Card className="bg-emerald-500/10 border-emerald-500/20 text-emerald-500 p-4 flex items-center gap-3">
+              <CheckCircle2 className="h-5 w-5" /> {successMsg}
+            </Card>
+          )}
+        </div>
+      )}
 
-        {/* Top summary row: Agent assignments & Cost monitoring */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Agent Assignments Card */}
-          <div className="glass-panel p-6 rounded-2xl border border-white/5 lg:col-span-2">
-            <h2 className="text-lg font-bold text-white mb-2 font-display">Assignation des Agents par Département</h2>
-            <p className="text-muted-foreground text-xs mb-6">Associez un LLM spécifique à chaque étape du workflow multi-agents.</p>
-
-            <div className="space-y-4">
-              {[
-                { key: 'strategy', name: '📈 Stratégie & Growth', desc: 'Analyse marché, modèle business et KPIs' },
-                { key: 'ux', name: '🎨 Conception & UX', desc: 'Conception interfaces et parcours utilisateur' },
-                { key: 'engineering', name: '⚙️ Ingénierie & Architecture', desc: 'Stack technique et modélisation MCD' },
-                { key: 'devops', name: '🛡️ DevOps & Sécurité', desc: 'Infrastructures cloud et pipelines CI/CD' },
-                { key: 'orchestrator', name: '🧠 Orchestrateur', desc: 'Synthèse finale, arbitrage et CDC' },
-              ].map((agent) => (
-                <div
-                  key={agent.key}
-                  className="flex flex-col sm:flex-row sm:items-center justify-between p-4 rounded-xl bg-white/5 border border-white/5 gap-3"
-                >
-                  <div className="min-w-0">
-                    <h3 className="text-sm font-bold text-white mb-0.5">{agent.name}</h3>
-                    <p className="text-xs text-muted-foreground">{agent.desc}</p>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        {/* Assignments */}
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Database className="h-5 w-5 text-primary" />
+              Assignation des Départements
+            </CardTitle>
+            <CardDescription>Associez un LLM spécifique à chaque étape du workflow.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {[
+              { key: 'strategy', label: 'Stratégie', icon: TrendingUp },
+              { key: 'ux', label: 'Conception UX', icon: Palette },
+              { key: 'engineering', label: 'Ingénierie', icon: Settings2 },
+              { key: 'devops', label: 'DevOps', icon: ShieldCheck },
+              { key: 'orchestrator', label: 'Orchestrateur', icon: Brain },
+            ].map((agent) => (
+              <div key={agent.key} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 rounded-xl bg-muted/30 border border-border/50 gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-background border border-border">
+                    <agent.icon className="h-4 w-4 text-muted-foreground" />
                   </div>
-                  <select
-                    value={assignments[agent.key] || 'mock'}
-                    onChange={(e) => handleAssignmentChange(agent.key, e.target.value)}
-                    className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white text-xs font-semibold focus:outline-none focus:border-violet-500"
-                  >
-                    <option value="mock" className="bg-[#090b14]">Mock (Simulation locale)</option>
-                    {configs
-                      .filter((c) => c.is_enabled)
-                      .map((c) => (
-                        <option key={c.provider} value={c.provider} className="bg-[#090b14]">
-                          {c.name} ({c.active_model})
-                        </option>
-                      ))}
-                  </select>
+                  <span className="text-sm font-bold">{agent.label}</span>
+                </div>
+                <select
+                  value={assignments[agent.key] || 'mock'}
+                  onChange={(e) => handleAssignmentChange(agent.key, e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-background border border-border text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option value="mock">Mock Simulator</option>
+                  {configs.filter(c => c.is_enabled).map(c => (
+                    <option key={c.provider} value={c.provider}>{c.name} ({c.active_model})</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        {/* Costs */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <BarChart3 className="h-5 w-5 text-primary" />
+              Monitoring
+            </CardTitle>
+            <CardDescription>Utilisation des tokens par fournisseur.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="space-y-3">
+              {costs.map((c) => (
+                <div key={c.provider} className="flex justify-between items-center py-2 border-b border-border/50">
+                  <span className="text-xs text-muted-foreground">{c.name}</span>
+                  <span className="text-sm font-bold font-mono">{c.tokens_used.toLocaleString()}</span>
                 </div>
               ))}
+              {costs.length === 0 && <p className="text-xs text-center text-muted-foreground py-10 italic">Aucune donnée.</p>}
             </div>
-          </div>
-
-          {/* Cost Summary Card */}
-          <div className="glass-panel p-6 rounded-2xl border border-white/5 flex flex-col justify-between">
-            <div>
-              <h2 className="text-lg font-bold text-white mb-2 font-display">Consommation des Jetons (Tokens)</h2>
-              <p className="text-muted-foreground text-xs mb-6">Total accumulé des requêtes envoyées aux APIs.</p>
-
-              <div className="space-y-4">
-                {costs.length === 0 ? (
-                  <p className="text-xs text-muted-foreground text-center py-6">Aucun jeton consommé pour le moment.</p>
-                ) : (
-                  costs.map((c) => (
-                    <div key={c.provider} className="flex justify-between items-center py-2 border-b border-white/5">
-                      <span className="text-xs text-muted-foreground">{c.name}</span>
-                      <span className="text-sm font-semibold text-white font-mono">{c.tokens_used.toLocaleString()}</span>
-                    </div>
-                  ))
-                )}
-              </div>
+            <div className="p-4 rounded-lg bg-primary/5 border border-primary/10 text-[10px] text-muted-foreground leading-relaxed">
+              <span className="font-bold text-primary block mb-1">💡 INFO</span>
+              Les requêtes sont redirigées vers le mode <strong>Mock</strong> si le fournisseur assigné est désactivé ou non configuré.
             </div>
+          </CardContent>
+        </Card>
+      </div>
 
-            <div className="mt-6 p-4 rounded-xl bg-violet-950/10 border border-violet-500/20 text-[11px] text-violet-300 leading-relaxed">
-              💡 Les providers non configurés ou désactivés redirigent automatiquement les requêtes vers le mode <strong>Mock</strong> si les agents y font appel.
-            </div>
-          </div>
-        </div>
+      {/* Provider Configs */}
+      <div className="space-y-6">
+        <h2 className="text-xl font-bold font-display tracking-tight flex items-center gap-2">
+          <Key className="h-5 w-5 text-primary" /> Configurateurs LLM
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {configs.map((config) => {
+            const isEnabled = config.is_enabled;
+            const activeModel = config.active_model || config.models[0] || '';
+            const keyInput = apiKeys[config.provider] || '';
+            const test = testResult[config.provider];
+            const keyLink = providerKeyLinks[config.provider];
 
-        {/* LLM Configurations Details */}
-        <div>
-          <h2 className="text-xl font-bold text-white mb-2 font-display">Configurations des API LLM</h2>
-          <p className="text-muted-foreground text-xs mb-6">Activez et gérez vos clés d'API sécurisées pour chaque grand modèle.</p>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {configs.map((config) => {
-              const isEnabled = config.is_enabled;
-              const activeModel = config.active_model || config.models[0] || '';
-              const keyInput = apiKeys[config.provider] || '';
-
-              return (
-                <div
-                  key={config.provider}
-                  className={`glass-panel p-6 rounded-2xl border transition-all ${
-                    isEnabled ? 'border-violet-500/20 bg-violet-950/5' : 'border-white/5'
-                  }`}
-                >
-                  <div className="flex justify-between items-start mb-4">
-                    <div>
-                      <h3 className="text-base font-bold text-white flex items-center gap-2">
-                        {config.name}
-                        {isEnabled && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />}
-                      </h3>
-                      <span className="text-xs text-muted-foreground uppercase tracking-widest font-mono">
-                        {config.provider}
-                      </span>
-                    </div>
+            return (
+              <Card key={config.provider} className={cn("transition-all", isEnabled ? "border-primary/30 shadow-lg shadow-primary/5" : "border-border/60")}>
+                <CardHeader className="flex flex-row items-start justify-between gap-4 pb-4">
+                  <div>
+                    <CardTitle className="text-base">{config.name}</CardTitle>
+                    <CardDescription className="font-mono text-[10px] uppercase">{config.provider}</CardDescription>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {keyLink && (
+                      <Button asChild variant="outline" size="sm" className="h-8 px-3 text-xs">
+                        <a href={keyLink} target="_blank" rel="noreferrer" title={`Ouvrir la console ${config.name}`}>
+                          Obtenir une clé
+                          <ExternalLink className="ml-2 h-3 w-3" />
+                        </a>
+                      </Button>
+                    )}
                     <label className="relative inline-flex items-center cursor-pointer">
                       <input
                         type="checkbox"
@@ -293,87 +314,92 @@ export default function AdminDashboard() {
                         onChange={(e) => handleUpdateProvider(config.provider, e.target.checked, activeModel)}
                         className="sr-only peer"
                       />
-                      <div className="w-9 h-5 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-violet-600"></div>
+                      <div className="w-9 h-5 bg-muted rounded-full peer peer-checked:bg-primary after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-full" />
                     </label>
                   </div>
-
-                  <div className="space-y-4 text-xs">
-                    {/* Model Selector */}
-                    <div>
-                      <label className="block text-muted-foreground mb-1">Modèle actif</label>
-                      <select
-                        value={activeModel}
-                        onChange={(e) => handleUpdateProvider(config.provider, isEnabled, e.target.value)}
-                        className="w-full px-3 py-2.5 rounded-lg bg-white/5 border border-white/10 text-white font-semibold focus:outline-none focus:border-violet-500"
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-muted-foreground uppercase">Modèle</label>
+                    <select
+                      value={activeModel}
+                      onChange={(e) => handleUpdateProvider(config.provider, isEnabled, e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      {config.models.map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                    <div className="flex gap-2 pt-2">
+                      <Input
+                        value={newModels[config.provider] || ''}
+                        onChange={(e) => setNewModels({ ...newModels, [config.provider]: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddModel(config.provider);
+                          }
+                        }}
+                        placeholder="Nouveau modèle, ex: grok-4"
+                        className="h-9 font-mono text-xs"
+                        maxLength={64}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!(newModels[config.provider] || '').trim() || addingModel[config.provider]}
+                        onClick={() => handleAddModel(config.provider)}
+                        className="h-9 shrink-0"
                       >
-                        {config.models.map((model) => (
-                          <option key={model} value={model} className="bg-[#090b14]">
-                            {model}
-                          </option>
-                        ))}
-                      </select>
+                        {addingModel[config.provider] ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+                        <span className="ml-2 hidden sm:inline">Ajouter</span>
+                      </Button>
                     </div>
-
-                    {/* API Key Input */}
-                    <div>
-                      <label className="block text-muted-foreground mb-1">
-                        Clé API {config.has_api_key && <span className="text-emerald-400 font-medium">(Déjà enregistrée)</span>}
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          type="password"
-                          value={keyInput}
-                          onChange={(e) => setApiKeys({ ...apiKeys, [config.provider]: e.target.value })}
-                          className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white font-mono placeholder:text-muted-foreground/30 focus:outline-none focus:border-violet-500"
-                          placeholder={config.has_api_key ? '••••••••••••••••' : 'Entrer la clé API'}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleTestConnection(config.provider, activeModel)}
-                          disabled={!keyInput || testingKey[config.provider]}
-                          className="px-3 py-2 bg-white/5 border border-white/10 hover:bg-white/10 text-white font-semibold rounded-lg transition-all text-xs disabled:opacity-30 disabled:pointer-events-none"
-                        >
-                          {testingKey[config.provider] ? 'Test...' : 'Tester'}
-                        </button>
-                      </div>
-
-                      {/* Test connection report */}
-                      {testResult[config.provider] && (
-                        <div
-                          className={`mt-2 p-2 rounded-md font-medium text-[11px] ${
-                            testResult[config.provider].success
-                              ? 'bg-emerald-950/20 border border-emerald-500/20 text-emerald-400'
-                              : 'bg-red-950/20 border border-red-500/20 text-red-400'
-                          }`}
-                        >
-                          {testResult[config.provider].success ? '✓ ' : '✗ '}
-                          {testResult[config.provider].message}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Save button if key is entered */}
-                    {keyInput && (
-                      <button
-                        type="button"
-                        onClick={() => handleUpdateProvider(config.provider, isEnabled, activeModel)}
-                        className="w-full py-2 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-lg transition-all"
-                      >
-                        Enregistrer la clé API
-                      </button>
-                    )}
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </main>
 
-      {/* Footer */}
-      <footer className="w-full max-w-7xl mx-auto px-6 py-8 border-t border-white/5 text-xs text-muted-foreground text-center">
-        © 2026 AIA Studio. Tous droits réservés.
-      </footer>
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-muted-foreground uppercase flex items-center justify-between">
+                      Clé API
+                      {config.has_api_key && <span className="text-emerald-500 font-bold lowercase italic tracking-normal">Enregistrée ✓</span>}
+                    </label>
+                    <div className="flex gap-2">
+                      <Input
+                        type="password"
+                        value={keyInput}
+                        onChange={(e) => setApiKeys({ ...apiKeys, [config.provider]: e.target.value })}
+                        placeholder={config.has_api_key ? '••••••••••••' : 'Ajouter une clé'}
+                        className="h-9 font-mono"
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!keyInput || testingKey[config.provider]}
+                        onClick={() => handleTestConnection(config.provider, activeModel)}
+                        className="h-9"
+                      >
+                        {testingKey[config.provider] ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Test'}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {test && (
+                    <div className={cn("p-2 rounded-lg text-[10px] font-medium border", test.success ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-500" : "bg-destructive/5 border-destructive/20 text-destructive")}>
+                      {test.success ? '✓' : '✗'} {test.message}
+                    </div>
+                  )}
+
+                  {keyInput && (
+                    <Button
+                      onClick={() => handleUpdateProvider(config.provider, isEnabled, activeModel)}
+                      className="w-full h-9"
+                    >
+                      Enregistrer la clé
+                    </Button>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

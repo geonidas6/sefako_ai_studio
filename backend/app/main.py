@@ -39,3 +39,8 @@ app.include_router(ws.router, tags=["websocket"])
 @app.get("/")
 async def root():
     return {"message": "AIA Backend v1.0", "docs": "/docs"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

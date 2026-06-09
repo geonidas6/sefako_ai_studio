@@ -1,47 +1,68 @@
-version: '3.8'
-
 services:
   db:
-    image: postgres:15-alpine
-    container_name: aia_postgres
-    restart: always
+    image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: aia_user
-      POSTGRES_PASSWORD: aia_password
-      POSTGRES_DB: aia_db
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-aia_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aia_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aia_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aia_user -d aia_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aia_user} -d ${POSTGRES_DB:-aia_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   backend:
-    build: ./backend
-    container_name: aia_backend
-    restart: always
+    build:
+      context: ./backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     environment:
-      - DATABASE_URL=postgresql+asyncpg://aia_user:aia_password@db:5432/aia_db
-      - SECRET_KEY=change-this-secret-key-for-jwt-signing-2026
-      - ENCRYPTION_KEY=c3B5ZGVyLWtleS1tdXN0LWJlLTMyLWJ5dGVzLWxvbmc=
-      - DEBUG=True
-    ports:
-      - "8000:8000"
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://aia_user:aia_password@db:5432/aia_db}
+      SECRET_KEY: ${SECRET_KEY:-change-this-secret-key-with-a-random-64-char-string}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-Admin@AIA2026!}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000","https://sefako-ai-studio.it-sefako.com"]}
+      DEBUG: ${DEBUG:-false}
+    expose:
+      - "8000"
     depends_on:
       db:
         condition: service_healthy
 
   frontend:
-    build: ./frontend
-    container_name: aia_frontend
-    restart: always
+    build:
+      context: ./frontend
+      args:
+        BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
+        NEXT_PUBLIC_API_DOMAIN: ${API_DOMAIN:-api-sefako-ai-studio.it-sefako.com}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     environment:
-      - BACKEND_URL=http://backend:8000
-    ports:
-      - "3000:3000"
+      BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
+      NEXT_PUBLIC_API_DOMAIN: ${API_DOMAIN:-api-sefako-ai-studio.it-sefako.com}
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: 1
+    expose:
+      - "3000"
     depends_on:
       - backend
 

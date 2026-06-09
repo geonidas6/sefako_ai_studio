@@ -1,0 +1,20 @@
+version: 1
+kind: auto-detected
+domains:
+  frontend: ${FRONTEND_DOMAIN}
+  api: ${API_DOMAIN}
+  db_admin: db-sefako-ai-studio.it-sefako.com
+env_files:
+- path: .env
+  template: .env.example
+services:
+  db:
+    public: false
+  backend:
+    public: true
+    domain: api
+    port: 8000
+  frontend:
+    public: true
+    domain: frontend
+    port: 3000

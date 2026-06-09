@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -50,6 +52,10 @@ class TestConnectionIn(BaseModel):
     model: str
 
 
+class ProviderModelIn(BaseModel):
+    model: str
+
+
 # ──────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────
@@ -61,7 +67,19 @@ async def get_llm_configs(
 ):
     """List all provider configurations."""
     result = await db.execute(select(LLMConfig))
-    configs = {c.provider: c for c in result.scalars().all()}
+    all_configs = result.scalars().all()
+    configs = {c.provider: c for c in all_configs}
+    custom_models: dict[str, list[str]] = {}
+    for cfg in all_configs:
+        if not cfg.provider.startswith("model_") or not cfg.value:
+            continue
+        parts = cfg.provider.split("_", 2)
+        if len(parts) < 3:
+            continue
+        provider_key = parts[1]
+        custom_models.setdefault(provider_key, [])
+        if cfg.value not in custom_models[provider_key]:
+            custom_models[provider_key].append(cfg.value)
 
     providers_out = []
     for key, info in PROVIDERS.items():
@@ -75,7 +93,7 @@ async def get_llm_configs(
                 is_enabled=cfg.is_enabled if cfg else False,
                 active_model=cfg.active_model if cfg else info["default_model"],
                 has_api_key=bool(cfg and cfg.api_key_encrypted),
-                models=info["models"],
+                models=[*info["models"], *custom_models.get(key, [])],
                 tokens_used=cfg.total_tokens_used if cfg else 0,
             )
         )
@@ -109,6 +127,56 @@ async def update_llm_config(
 
     await db.commit()
     return {"success": True, "provider": provider}
+
+
+@router.post("/llm-config/{provider}/models")
+async def add_provider_model(
+    provider: str,
+    body: ProviderModelIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    """Add a custom model to a provider selector."""
+    if provider not in PROVIDERS or provider == "mock":
+        raise HTTPException(status_code=400, detail=f"Provider inconnu: {provider}")
+
+    model = body.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Le nom du modèle est requis")
+    if len(model) > 64:
+        raise HTTPException(status_code=400, detail="Le nom du modèle doit faire 64 caractères maximum")
+
+    default_models = set(PROVIDERS[provider]["models"])
+    if model in default_models:
+        return {"success": True, "provider": provider, "model": model, "already_exists": True}
+
+    result = await db.execute(
+        select(LLMConfig).where(
+            LLMConfig.provider.like(f"model_{provider}_%"),
+            LLMConfig.value == model,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        return {"success": True, "provider": provider, "model": model, "already_exists": True}
+
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", model).strip("-").lower() or "custom"
+    slug = slug[:40]
+    base_key = f"model_{provider}_{slug}"
+    key = base_key[:64]
+    suffix = 2
+    while True:
+        result = await db.execute(select(LLMConfig).where(LLMConfig.provider == key))
+        if result.scalar_one_or_none() is None:
+            break
+        suffix_text = f"_{suffix}"
+        key = f"{base_key[:64 - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+
+    cfg = LLMConfig(provider=key, value=model)
+    db.add(cfg)
+    await db.commit()
+    return {"success": True, "provider": provider, "model": model}
 
 
 @router.get("/llm-config/assignments")
@@ -172,7 +240,7 @@ async def get_cost_summary(
     _: object = Depends(get_current_admin),
 ):
     """Get token usage per provider."""
-    result = await db.execute(select(LLMConfig).where(~LLMConfig.provider.like("assign_%")))
+    result = await db.execute(select(LLMConfig).where(~LLMConfig.provider.like("assign_%"), ~LLMConfig.provider.like("model_%")))
     configs = result.scalars().all()
     return [
         {

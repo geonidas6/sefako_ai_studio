@@ -3,134 +3,101 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  Terminal, 
+  FileText, 
+  MessagesSquare, 
+  Trophy, 
+  ChevronLeft, 
+  Zap, 
+  Loader2, 
+  CheckCircle2, 
+  AlertCircle,
+  BookOpen,
+  Database,
+  Layers,
+  Calendar,
+  ClipboardList
+} from 'lucide-react';
 import { api } from '../../../lib/api';
 import { connectProjectWs, WsEvent } from '../../../lib/websocket';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { cn } from '@/lib/utils';
 
-// Simple lightweight Markdown to HTML converter to avoid extra dependencies
+// Simple lightweight Markdown to HTML converter
 function parseMarkdown(md: string = ''): string {
   if (!md) return '';
-
-  let html = md
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-  // Fenced Code blocks
-  html = html.replace(/```([\s\S]*?)```/gm, (_, code) => {
-    return `<pre><code>${code.trim()}</code></pre>`;
-  });
-
-  // Headers
+  let html = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  html = html.replace(/```([\s\S]*?)```/gm, (_, code) => `<pre><code>${code.trim()}</code></pre>`);
   html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
   html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
   html = html.replace(/^# (.*$)/gim, '<h1>$1</h1>');
-
-  // Bold
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-
-  // Inline code
   html = html.replace(/`(.*?)`/g, '<code>$1</code>');
-
-  // Unordered Lists
   html = html.replace(/^\s*[-*]\s+(.*)$/gim, '<li>$1</li>');
-
-  // Wrap consecutive list items in <ul>
-  // A simple way is to replace closing and opening list items
   html = html.replace(/(<li>.*<\/li>)/g, '<ul>$1</ul>');
-  // Clean up duplicate lists next to each other
   html = html.replace(/<\/ul>\s*<ul>/g, '');
-
-  // Line breaks for paragraphs (split by double newlines)
   const paragraphs = html.split(/\n\n+/);
-  html = paragraphs
-    .map((p) => {
-      p = p.trim();
-      if (!p) return '';
-      if (p.startsWith('<h') || p.startsWith('<pre') || p.startsWith('<ul') || p.startsWith('<li>')) {
-        return p;
-      }
-      return `<p>${p.replace(/\n/g, '<br />')}</p>`;
-    })
-    .join('');
-
-  return html;
+  return paragraphs.map((p) => {
+    p = p.trim();
+    if (!p) return '';
+    if (p.startsWith('<h') || p.startsWith('<pre') || p.startsWith('<ul') || p.startsWith('<li>')) return p;
+    return `<p>${p.replace(/\n/g, '<br />')}</p>`;
+  }).join('');
 }
 
 export default function ProjectDashboard() {
   const params = useParams();
-  const router = useRouter();
   const projectId = params.id as string;
 
   const [project, setProject] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'live' | 'r1' | 'r2' | 'deliverables'>('live');
-  const [activeDeliverable, setActiveDeliverable] = useState<'cdc' | 'mcd' | 'architecture' | 'roadmap' | 'notes'>('cdc');
+  const [activeDeliverable, setActiveDeliverable] = useState<'cdc' | 'mcd' | 'architecture' | 'roadmap' | 'notes_synthese'>('cdc');
 
-  // WebSocket / streaming states
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<{ text: string; type?: 'info' | 'success' | 'error' | 'system' }[]>([]);
   const [runningAgents, setRunningAgents] = useState<Record<string, boolean>>({});
-  const [completedAgents, setCompletedAgents] = useState<Record<string, { round: number; preview: string }>>({});
-  const [currentRound, setCurrentRound] = useState<number>(0);
   const [wsStatus, setWsStatus] = useState<'connecting' | 'running' | 'idle' | 'error'>('idle');
 
   const wsCleanupRef = useRef<(() => void) | null>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
 
-  // Load project initially
+  useEffect(() => {
+    if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
+
   useEffect(() => {
     async function loadProject() {
       try {
         const data = await api.projects.get(projectId);
         setProject(data);
-
-        // If completed, set to deliverables tab by default
-        if (data.status === 'completed') {
-          setActiveTab('deliverables');
-        } else if (data.status === 'running' || data.status === 'pending') {
-          // If running or pending, automatically connect WS to listen for logs
-          startStreaming();
-        }
+        if (data.status === 'completed') setActiveTab('deliverables');
+        else if (data.status === 'running' || data.status === 'pending') startStreaming();
       } catch (err: any) {
-        console.error('Error fetching project:', err);
         setError(err.message || 'Impossible de charger le projet.');
       } finally {
         setLoading(false);
       }
     }
-
     loadProject();
-
-    return () => {
-      if (wsCleanupRef.current) {
-        wsCleanupRef.current();
-      }
-    };
+    return () => { if (wsCleanupRef.current) wsCleanupRef.current(); };
   }, [projectId]);
 
   const startStreaming = () => {
-    if (wsCleanupRef.current) {
-      wsCleanupRef.current();
-    }
+    if (wsCleanupRef.current) wsCleanupRef.current();
     setWsStatus('connecting');
-    setLogs((prev) => [...prev, '[Système] Connexion au canal de streaming...']);
+    setLogs((prev) => [...prev, { text: 'Connexion au canal de streaming...', type: 'system' }]);
 
-    const cleanup = connectProjectWs(
-      projectId,
-      (event: WsEvent) => {
-        handleWsEvent(event);
-      },
-      () => {
-        setWsStatus('idle');
-        // Refresh project data to get final deliverables
-        refreshProject();
-      },
-      (err) => {
-        console.error('WS error:', err);
-        setWsStatus('error');
-        setLogs((prev) => [...prev, '[Erreur] Connexion interrompue.']);
-      }
-    );
-
+    const cleanup = connectProjectWs(projectId, handleWsEvent, () => {
+      setWsStatus('idle');
+      refreshProject();
+    }, (err) => {
+      setWsStatus('error');
+      setLogs((prev) => [...prev, { text: 'Connexion interrompue.', type: 'error' }]);
+    });
     wsCleanupRef.current = cleanup;
   };
 
@@ -138,424 +105,246 @@ export default function ProjectDashboard() {
     try {
       const data = await api.projects.get(projectId);
       setProject(data);
-      if (data.status === 'completed') {
-        setActiveTab('deliverables');
-      }
-    } catch (err) {
-      console.error('Error refreshing project:', err);
-    }
+      if (data.status === 'completed') setActiveTab('deliverables');
+    } catch (err) {}
   };
 
   const handleWsEvent = (event: WsEvent) => {
-    const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
-
     switch (event.type) {
       case 'round_start':
-        setCurrentRound(event.round || 0);
         setWsStatus('running');
-        setLogs((prev) => [
-          ...prev,
-          `[${timestamp}] ── ROUND ${event.round} : ${event.message || 'Début'} ──`,
-        ]);
+        setLogs((prev) => [...prev, { text: `── ROUND ${event.round} : ${event.message || 'Début'} ──`, type: 'info' }]);
         break;
-
-      case 'round_complete':
-        setLogs((prev) => [...prev, `[${timestamp}] ✓ Round ${event.round} complété`]);
-        setRunningAgents({});
-        break;
-
       case 'agent_start':
         setRunningAgents((prev) => ({ ...prev, [event.agent || '']: true }));
-        setLogs((prev) => [
-          ...prev,
-          `[${timestamp}] [Département ${event.agent?.toUpperCase()}] Début de la rédaction...`,
-        ]);
+        setLogs((prev) => [...prev, { text: `[Département ${event.agent?.toUpperCase()}] Début de la rédaction...`, type: 'info' }]);
         break;
-
       case 'agent_complete':
         setRunningAgents((prev) => ({ ...prev, [event.agent || '']: false }));
-        setCompletedAgents((prev) => ({
-          ...prev,
-          [`${event.agent}_r${event.round}`]: {
-            round: event.round || 1,
-            preview: event.preview || '',
-          },
-        }));
-        setLogs((prev) => [
-          ...prev,
-          `[${timestamp}] [Département ${event.agent?.toUpperCase()}] ✓ Rédaction terminée. Aperçu : ${
-            event.preview ? event.preview.substring(0, 80) + '...' : ''
-          }`,
-        ]);
+        setLogs((prev) => [...prev, { text: `[Département ${event.agent?.toUpperCase()}] Rédaction terminée.`, type: 'success' }]);
         break;
-
       case 'agent_error':
         setRunningAgents((prev) => ({ ...prev, [event.agent || '']: false }));
-        setLogs((prev) => [
-          ...prev,
-          `[${timestamp}] [Département ${event.agent?.toUpperCase()}] ✗ Erreur : ${event.error}`,
-        ]);
+        setLogs((prev) => [...prev, { text: `[Département ${event.agent?.toUpperCase()}] Erreur : ${event.error}`, type: 'error' }]);
         break;
-
       case 'workflow_complete':
-        setLogs((prev) => [...prev, `[${timestamp}] 🎉 Workflow terminé avec succès !`]);
+        setLogs((prev) => [...prev, { text: 'Workflow terminé avec succès !', type: 'success' }]);
         setWsStatus('idle');
         if (event.deliverables) {
-          setProject((prev: any) => ({
-            ...prev,
-            status: 'completed',
-            final_deliverables: event.deliverables,
-          }));
+          setProject((prev: any) => ({ ...prev, status: 'completed', final_deliverables: event.deliverables }));
           setActiveTab('deliverables');
         }
         break;
-
       case 'workflow_error':
       case 'error':
-        setLogs((prev) => [...prev, `[Erreur] Échec du workflow : ${event.message || event.error}`]);
+        setLogs((prev) => [...prev, { text: `Échec du workflow : ${event.message || event.error}`, type: 'error' }]);
         setWsStatus('error');
-        setProject((prev: any) => ({
-          ...prev,
-          status: 'failed',
-        }));
-        break;
-
-      default:
+        setProject((prev: any) => ({ ...prev, status: 'failed' }));
         break;
     }
   };
 
-  const getAgentLabel = (agent: string) => {
-    switch (agent) {
-      case 'strategy':
-        return 'Stratégie & Growth';
-      case 'ux':
-        return 'Conception & UX';
-      case 'engineering':
-        return 'Ingénierie & Architecture';
-      case 'devops':
-        return 'DevOps & Sécurité';
-      default:
-        return agent;
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[#05070f] flex items-center justify-center text-muted-foreground">
-        Chargement de la session d'analyse...
-      </div>
-    );
-  }
-
-  if (error || !project) {
-    return (
-      <div className="min-h-screen bg-[#05070f] flex flex-col items-center justify-center p-6 text-center">
-        <div className="glass-panel p-8 rounded-xl border border-red-500/20 max-w-md">
-          <p className="text-red-400 mb-4">{error || 'Session introuvable'}</p>
-          <Link href="/" className="px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white hover:bg-white/10 transition-all">
-            Retour à l'accueil
-          </Link>
-        </div>
-      </div>
-    );
-  }
+  if (loading) return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
+  if (error || !project) return (
+    <div className="min-h-screen flex items-center justify-center p-6">
+      <Card className="max-w-md border-destructive/20">
+        <CardHeader><CardTitle className="text-destructive">Erreur</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">{error || 'Session introuvable'}</p>
+          <Button asChild variant="outline" className="w-full"><Link href="/">Retour à l'accueil</Link></Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
 
   const deliverables = project.final_deliverables || {};
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#05070f] relative overflow-hidden">
-      {/* Glows */}
-      <div className="absolute top-[-20%] left-[-10%] w-[60%] h-[60%] rounded-full bg-violet-900/5 blur-[150px] pointer-events-none" />
-      <div className="absolute bottom-[-20%] right-[-10%] w-[60%] h-[60%] rounded-full bg-cyan-900/5 blur-[150px] pointer-events-none" />
-
-      {/* Header */}
-      <header className="w-full border-b border-white/5 bg-[#090b14]/50 backdrop-blur-md sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-          <div className="flex items-center gap-4 min-w-0">
-            <Link href="/" className="text-xs text-muted-foreground hover:text-white transition-colors shrink-0">
-              ← Accueil
-            </Link>
-            <span className="text-muted-foreground/30 text-xs shrink-0">/</span>
-            <h1 className="text-base font-bold text-white truncate">{project.title}</h1>
-            <span
-              className={`text-[10px] px-2 py-0.5 rounded-full font-medium shrink-0 ${
-                project.status === 'completed'
-                  ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-500/20'
-                  : project.status === 'running'
-                  ? 'bg-violet-950/40 text-violet-400 border border-violet-500/20 animate-pulse'
-                  : project.status === 'failed'
-                  ? 'bg-red-950/40 text-red-400 border border-red-500/20'
-                  : 'bg-yellow-950/40 text-yellow-400 border border-yellow-500/20'
-              }`}
-            >
-              {project.status === 'completed'
-                ? 'Terminé'
-                : project.status === 'running'
-                ? 'En cours'
-                : project.status === 'failed'
-                ? 'Échoué'
-                : 'En attente'}
-            </span>
-          </div>
-
-          <div className="flex gap-2">
-            {(project.status === 'pending' || project.status === 'failed') && wsStatus === 'idle' && (
-              <button
-                onClick={startStreaming}
-                className="text-xs font-semibold bg-gradient-to-r from-violet-600 to-cyan-600 hover:from-violet-500 hover:to-cyan-500 text-white px-4 py-2 rounded-lg transition-all"
-              >
-                ⚡ Lancer l'Analyse
-              </button>
-            )}
-            {wsStatus === 'running' && (
-              <span className="text-xs text-violet-400 flex items-center gap-1.5 font-medium">
-                <span className="w-2 h-2 rounded-full bg-violet-500 animate-ping" />
-                Débat en direct...
-              </span>
-            )}
+    <div className="flex flex-col min-h-screen">
+      {/* Page Header */}
+      <header className="border-b border-border/60 bg-muted/20">
+        <div className="max-w-7xl mx-auto px-6 py-8">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div className="space-y-2">
+              <Link href="/" className="inline-flex items-center text-xs text-muted-foreground hover:text-foreground transition-colors mb-2">
+                <ChevronLeft className="mr-1 h-3 w-3" /> Retour
+              </Link>
+              <h1 className="text-2xl font-bold font-display tracking-tight flex items-center gap-3">
+                {project.title}
+                <span className={cn(
+                  "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-widest",
+                  project.status === 'completed' ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" :
+                  project.status === 'running' ? "bg-primary/10 text-primary border border-primary/20 animate-pulse" :
+                  project.status === 'failed' ? "bg-destructive/10 text-destructive border border-destructive/20" :
+                  "bg-muted text-muted-foreground border border-border"
+                )}>
+                  {project.status === 'completed' ? 'Terminé' : project.status === 'running' ? 'En cours' : project.status === 'failed' ? 'Échoué' : 'En attente'}
+                </span>
+              </h1>
+              <p className="text-sm text-muted-foreground line-clamp-1 max-w-2xl">{project.input_text}</p>
+            </div>
+            
+            <div className="flex gap-3">
+              {(project.status === 'pending' || project.status === 'failed') && wsStatus === 'idle' && (
+                <Button onClick={startStreaming} className="gap-2">
+                  <Zap className="h-4 w-4" /> Lancer l'Analyse
+                </Button>
+              )}
+              {wsStatus === 'running' && (
+                <div className="flex items-center gap-2 text-primary text-sm font-semibold px-4 py-2 bg-primary/10 rounded-lg border border-primary/20">
+                  <span className="h-2 w-2 rounded-full bg-primary animate-ping" />
+                  Analyse en cours...
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </header>
 
-      {/* Workspace Grid */}
-      <main className="flex-1 max-w-7xl mx-auto px-6 py-8 w-full z-10 flex flex-col gap-6">
-        {/* Project meta summary card */}
-        <div className="glass-panel p-5 rounded-2xl border border-white/5 bg-[#090b14]/30">
-          <h2 className="text-xs font-bold text-muted-foreground uppercase tracking-widest mb-1.5">Description d'origine</h2>
-          <p className="text-xs text-foreground/80 leading-relaxed max-h-24 overflow-y-auto pr-2">
-            {project.input_text}
-          </p>
-        </div>
-
-        {/* Navigation Tabs */}
-        <div className="flex border-b border-white/5 gap-4">
-          <button
-            onClick={() => setActiveTab('live')}
-            className={`pb-3 text-sm font-semibold transition-all border-b-2 px-1 ${
-              activeTab === 'live'
-                ? 'border-violet-500 text-violet-400'
-                : 'border-transparent text-muted-foreground hover:text-white'
-            }`}
-          >
-            📋 Journal de l'Orchestrateur
-          </button>
-          <button
-            onClick={() => setActiveTab('r1')}
-            className={`pb-3 text-sm font-semibold transition-all border-b-2 px-1 ${
-              activeTab === 'r1'
-                ? 'border-violet-500 text-violet-400'
-                : 'border-transparent text-muted-foreground hover:text-white'
-            }`}
-          >
-            📈 Round 1 : Analyses
-          </button>
-          <button
-            onClick={() => setActiveTab('r2')}
-            className={`pb-3 text-sm font-semibold transition-all border-b-2 px-1 ${
-              activeTab === 'r2'
-                ? 'border-violet-500 text-violet-400'
-                : 'border-transparent text-muted-foreground hover:text-white'
-            }`}
-          >
-            💬 Round 2 : Critiques Croisées
-          </button>
-          <button
-            onClick={() => setActiveTab('deliverables')}
-            disabled={project.status !== 'completed'}
-            className={`pb-3 text-sm font-semibold transition-all border-b-2 px-1 disabled:opacity-40 disabled:pointer-events-none ${
-              activeTab === 'deliverables'
-                ? 'border-violet-500 text-violet-400'
-                : 'border-transparent text-muted-foreground hover:text-white'
-            }`}
-          >
-            🏆 Round 3 : Livrables Synthétisés
-          </button>
+      {/* Main Workspace */}
+      <main className="flex-1 max-w-7xl mx-auto px-6 py-8 w-full flex flex-col gap-8">
+        {/* Nav Tabs */}
+        <div className="flex gap-8 border-b border-border overflow-x-auto scrollbar-none">
+          {[
+            { id: 'live', label: 'Journal', icon: Terminal },
+            { id: 'r1', label: 'Round 1', icon: FileText },
+            { id: 'r2', label: 'Round 2', icon: MessagesSquare },
+            { id: 'deliverables', label: 'Livrables', icon: Trophy, disabled: project.status !== 'completed' },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              disabled={tab.disabled}
+              className={cn(
+                "flex items-center gap-2 pb-4 text-sm font-semibold transition-all border-b-2 disabled:opacity-30 disabled:pointer-events-none whitespace-nowrap",
+                activeTab === tab.id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <tab.icon className="h-4 w-4" />
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Tab Contents */}
-        <div className="flex-1 min-h-0">
-          {/* Tab: Live console logs */}
-          {activeTab === 'live' && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full items-start">
-              {/* Logs area */}
-              <div className="glass-panel rounded-2xl border border-white/5 bg-[#03040a]/80 p-5 lg:col-span-2 h-[500px] flex flex-col">
-                <div className="flex justify-between items-center mb-3">
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">Console d'Orchestration</h3>
-                  <span className="text-[10px] text-muted-foreground font-mono">WS Status: {wsStatus}</span>
-                </div>
-                <div className="flex-1 overflow-y-auto font-mono text-[11px] text-zinc-300 space-y-2 p-3 bg-black/40 rounded-xl border border-white/5 scrollbar">
-                  {logs.map((log, index) => (
-                    <div key={index} className="leading-relaxed border-l-2 border-violet-500/30 pl-3.5 py-0.5">
-                      {log}
+        <div className="flex-1 min-h-[500px]">
+          <AnimatePresence mode="wait">
+            {activeTab === 'live' && (
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <Card className="lg:col-span-2 bg-black border-border/40 shadow-2xl">
+                  <CardHeader className="border-b border-border/40 py-3 flex flex-row items-center justify-between">
+                    <CardTitle className="text-xs font-mono text-muted-foreground flex items-center gap-2 uppercase tracking-widest">
+                      <Terminal className="h-3.5 w-3.5" /> aia-orchestrator --output-logs
+                    </CardTitle>
+                    <div className="flex gap-1.5">
+                      <div className="h-2.5 w-2.5 rounded-full bg-destructive/50" />
+                      <div className="h-2.5 w-2.5 rounded-full bg-amber-500/50" />
+                      <div className="h-2.5 w-2.5 rounded-full bg-emerald-500/50" />
                     </div>
-                  ))}
-                  {logs.length === 0 && (
-                    <p className="text-muted-foreground text-center py-20 font-sans">
-                      Le journal est vide. Cliquez sur "Lancer l'Analyse" pour démarrer le workflow multi-agents.
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              {/* Agent Status checklist */}
-              <div className="glass-panel p-5 rounded-2xl border border-white/5 bg-[#090b14]/50 space-y-6">
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">État des Agents</h3>
-                  <div className="space-y-3">
-                    {['strategy', 'ux', 'engineering', 'devops'].map((agent) => {
-                      const isRunning = runningAgents[agent];
-                      const isDoneR1 = !!completedAgents[`${agent}_r1`];
-                      const isDoneR2 = !!completedAgents[`${agent}_r2`];
-
-                      return (
-                        <div key={agent} className="p-3 rounded-xl bg-white/5 border border-white/5 flex items-center justify-between">
-                          <span className="text-xs font-bold text-white">{getAgentLabel(agent)}</span>
-                          <div className="flex items-center gap-2">
-                            {isRunning ? (
-                              <span className="text-[10px] bg-violet-950/40 text-violet-400 px-2 py-0.5 rounded border border-violet-500/20 animate-pulse">
-                                Rédige...
-                              </span>
-                            ) : isDoneR2 ? (
-                              <span className="text-[10px] bg-emerald-950/40 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/20">
-                                Prêt (R2)
-                              </span>
-                            ) : isDoneR1 ? (
-                              <span className="text-[10px] bg-blue-950/40 text-blue-400 px-2 py-0.5 rounded border border-blue-500/20">
-                                Prêt (R1)
-                              </span>
-                            ) : (
-                              <span className="text-[10px] bg-zinc-900 text-zinc-500 px-2 py-0.5 rounded border border-zinc-800">
-                                Inactif
-                              </span>
-                            )}
-                          </div>
+                  </CardHeader>
+                  <CardContent className="p-0">
+                    <div className="h-[450px] overflow-y-auto p-4 font-mono text-[11px] leading-relaxed scrollbar-thin scrollbar-thumb-muted-foreground/20">
+                      {logs.map((log, i) => (
+                        <div key={i} className={cn(
+                          "mb-1.5 flex gap-3",
+                          log.type === 'error' ? "text-destructive" :
+                          log.type === 'success' ? "text-emerald-500" :
+                          log.type === 'system' ? "text-primary" : "text-zinc-400"
+                        )}>
+                          <span className="opacity-30 shrink-0">[{new Date().toLocaleTimeString()}]</span>
+                          <span>{log.text}</span>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
+                      ))}
+                      {logs.length === 0 && <div className="h-full flex flex-col items-center justify-center text-muted-foreground/30 font-sans italic py-20">Attente d'instructions...</div>}
+                      <div ref={logEndRef} />
+                    </div>
+                  </CardContent>
+                </Card>
 
-                <div className="p-4 bg-white/5 rounded-xl border border-white/5 text-xs text-muted-foreground leading-relaxed">
-                  📊 <strong>En direct :</strong> Le journal montre les étapes d'exécution de LangGraph. Lorsque la synthèse est générée, l'application bascule automatiquement sur les livrables finaux.
+                <div className="space-y-6">
+                  <Card>
+                    <CardHeader><CardTitle className="text-sm">État des Agents</CardTitle></CardHeader>
+                    <CardContent className="space-y-3">
+                      {['strategy', 'ux', 'engineering', 'devops'].map((agent) => (
+                        <div key={agent} className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border border-border/50">
+                          <span className="text-xs font-bold capitalize">{agent}</span>
+                          {runningAgents[agent] ? (
+                            <span className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded animate-pulse">En cours</span>
+                          ) : (
+                            <CheckCircle2 className={cn("h-4 w-4", project.status === 'completed' ? "text-emerald-500" : "text-muted-foreground/30")} />
+                          )}
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
                 </div>
-              </div>
-            </div>
-          )}
+              </motion.div>
+            )}
 
-          {/* Tab: Round 1 (Analyses) */}
-          {activeTab === 'r1' && (
-            <div className="space-y-6">
-              <div className="text-sm text-muted-foreground">
-                Voici les livrables bruts rédigés par chaque département au cours du premier round.
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {(activeTab === 'r1' || activeTab === 'r2') && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {[
-                  { key: 'strategy', title: '📈 Département Stratégie', content: project.strategy_r1 },
-                  { key: 'ux', title: '🎨 Département UX', content: project.ux_r1 },
-                  { key: 'engineering', title: '⚙️ Département Ingénierie', content: project.engineering_r1 },
-                  { key: 'devops', title: '🛡️ Département DevOps', content: project.devops_r1 },
+                  { key: 'strategy', title: 'Stratégie', content: activeTab === 'r1' ? project.strategy_r1 : project.critiques?.strategy },
+                  { key: 'ux', title: 'UX', content: activeTab === 'r1' ? project.ux_r1 : project.critiques?.ux },
+                  { key: 'engineering', title: 'Ingénierie', content: activeTab === 'r1' ? project.engineering_r1 : project.critiques?.engineering },
+                  { key: 'devops', title: 'DevOps', content: activeTab === 'r1' ? project.devops_r1 : project.critiques?.devops },
                 ].map((sec) => (
-                  <div key={sec.key} className="glass-panel p-5 rounded-xl border border-white/5 h-[350px] flex flex-col bg-[#090b14]/50">
-                    <h3 className="text-sm font-bold text-white mb-3">{sec.title}</h3>
-                    <div
-                      className="flex-1 overflow-y-auto text-xs text-muted-foreground space-y-2 prose pr-2 scrollbar"
-                      dangerouslySetInnerHTML={{ __html: parseMarkdown(sec.content || '_Aucun livrable disponible pour ce round._') }}
-                    />
-                  </div>
+                  <Card key={sec.key} className="h-[400px] flex flex-col">
+                    <CardHeader className="border-b border-border/50 py-3">
+                      <CardTitle className="text-sm flex justify-between items-center">
+                        {sec.title}
+                        <span className="text-[10px] font-normal text-muted-foreground">{activeTab === 'r1' ? 'Analysis' : 'Critique'}</span>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="flex-1 overflow-y-auto p-5 prose prose-sm max-w-none scrollbar-thin">
+                      <div dangerouslySetInnerHTML={{ __html: parseMarkdown(sec.content || '*En attente de génération...*') }} />
+                    </CardContent>
+                  </Card>
                 ))}
-              </div>
-            </div>
-          )}
+              </motion.div>
+            )}
 
-          {/* Tab: Round 2 (Critiques) */}
-          {activeTab === 'r2' && (
-            <div className="space-y-6">
-              <div className="text-sm text-muted-foreground">
-                Chaque agent s'est vu présenter le travail de ses confrères. Voici leurs critiques croisées et propositions de compromis.
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {[
-                  { key: 'strategy', title: '📈 Critique Stratégie', content: project.critiques?.strategy },
-                  { key: 'ux', title: '🎨 Critique UX', content: project.critiques?.ux },
-                  { key: 'engineering', title: '⚙️ Critique Ingénierie', content: project.critiques?.engineering },
-                  { key: 'devops', title: '🛡️ Critique DevOps', content: project.critiques?.devops },
-                ].map((sec) => (
-                  <div key={sec.key} className="glass-panel p-5 rounded-xl border border-white/5 h-[350px] flex flex-col bg-[#090b14]/50">
-                    <h3 className="text-sm font-bold text-white mb-3">{sec.title}</h3>
-                    <div
-                      className="flex-1 overflow-y-auto text-xs text-muted-foreground space-y-2 prose pr-2 scrollbar"
-                      dangerouslySetInnerHTML={{ __html: parseMarkdown(sec.content || '_Aucune critique disponible pour ce round._') }}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Tab: Deliverables (Completed) */}
-          {activeTab === 'deliverables' && (
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
-              {/* Deliverable selector list */}
-              <div className="glass-panel p-4 rounded-xl border border-white/5 space-y-2 bg-[#090b14]/50">
-                <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3 px-2">Spécifications</h3>
-                {[
-                  { key: 'cdc', label: '📖 Cahier des Charges' },
-                  { key: 'mcd', label: '📊 Modélisation MCD' },
-                  { key: 'architecture', label: '🏗️ Architecture Technique' },
-                  { key: 'roadmap', label: '📅 Roadmap MVP' },
-                  { key: 'notes', label: '📝 Notes de Synthèse' },
-                ].map((item) => (
-                  <button
-                    key={item.key}
-                    onClick={() => setActiveDeliverable(item.key as any)}
-                    className={`w-full text-left text-xs font-semibold px-3 py-2.5 rounded-lg transition-all border flex justify-between items-center ${
-                      activeDeliverable === item.key
-                        ? 'bg-violet-600/10 text-violet-400 border-violet-500/30'
-                        : 'border-transparent text-muted-foreground hover:bg-white/5 hover:text-white'
-                    }`}
-                  >
-                    <span>{item.label}</span>
-                    <span>→</span>
-                  </button>
-                ))}
-              </div>
-
-              {/* Deliverable preview content panel */}
-              <div className="glass-panel p-6 rounded-2xl border border-white/5 lg:col-span-3 min-h-[500px] bg-[#090b14]/20 flex flex-col">
-                <div className="flex justify-between items-center border-b border-white/5 pb-4 mb-4">
-                  <h3 className="text-lg font-bold text-white font-display uppercase tracking-wide">
-                    {activeDeliverable === 'cdc' && '📖 Cahier des Charges'}
-                    {activeDeliverable === 'mcd' && '📊 Modélisation Conceptuelle des Données'}
-                    {activeDeliverable === 'architecture' && '🏗️ Architecture Technique'}
-                    {activeDeliverable === 'roadmap' && '📅 Roadmap MVP'}
-                    {activeDeliverable === 'notes' && '📝 Notes de Synthèse & Arbitrage'}
-                  </h3>
+            {activeTab === 'deliverables' && (
+              <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="grid grid-cols-1 lg:grid-cols-4 gap-8 items-start">
+                <div className="lg:col-span-1 space-y-2">
+                  {[
+                    { key: 'cdc', label: 'Spécifications', icon: BookOpen },
+                    { key: 'mcd', label: 'Modélisation MCD', icon: Database },
+                    { key: 'architecture', label: 'Architecture', icon: Layers },
+                    { key: 'roadmap', label: 'Roadmap MVP', icon: Calendar },
+                    { key: 'notes_synthese', label: 'Synthèse', icon: ClipboardList },
+                  ].map((item) => (
+                    <button
+                      key={item.key}
+                      onClick={() => setActiveDeliverable(item.key as any)}
+                      className={cn(
+                        "w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all border",
+                        activeDeliverable === item.key ? "bg-primary/5 text-primary border-primary/20" : "bg-transparent border-transparent text-muted-foreground hover:bg-muted/50"
+                      )}
+                    >
+                      <item.icon className="h-4 w-4" /> {item.label}
+                    </button>
+                  ))}
                 </div>
 
-                <div className="flex-1 prose text-muted-foreground text-sm max-w-none">
-                  {activeDeliverable === 'cdc' && (
-                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(deliverables.cdc) }} />
-                  )}
-                  {activeDeliverable === 'mcd' && (
-                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(deliverables.mcd) }} />
-                  )}
-                  {activeDeliverable === 'architecture' && (
-                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(deliverables.architecture) }} />
-                  )}
-                  {activeDeliverable === 'roadmap' && (
-                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(deliverables.roadmap) }} />
-                  )}
-                  {activeDeliverable === 'notes' && (
-                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(deliverables.notes_synthese) }} />
-                  )}
-                  {!deliverables[activeDeliverable === 'notes' ? 'notes_synthese' : activeDeliverable] && (
-                    <p className="text-xs italic text-muted-foreground">Ce livrable est vide.</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
+                <Card className="lg:col-span-3 min-h-[600px] border-border/60 shadow-xl">
+                  <CardHeader className="border-b border-border/40">
+                    <CardTitle className="text-xl capitalize flex items-center gap-3">
+                      {activeDeliverable === 'cdc' ? <BookOpen className="h-5 w-5 text-primary" /> :
+                       activeDeliverable === 'mcd' ? <Database className="h-5 w-5 text-primary" /> :
+                       activeDeliverable === 'architecture' ? <Layers className="h-5 w-5 text-primary" /> :
+                       activeDeliverable === 'roadmap' ? <Calendar className="h-5 w-5 text-primary" /> :
+                       <ClipboardList className="h-5 w-5 text-primary" />}
+                      {activeDeliverable.replace('_', ' ')}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="p-8 prose prose-slate dark:prose-invert max-w-none">
+                    <div dangerouslySetInnerHTML={{ __html: parseMarkdown(deliverables[activeDeliverable] || '*Livrable non généré.*') }} />
+                  </CardContent>
+                </Card>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </main>
     </div>

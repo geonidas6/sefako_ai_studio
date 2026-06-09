@@ -122,6 +122,12 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
+    async addModel(provider: string, model: string) {
+      return request(`/admin/llm-config/${provider}/models`, {
+        method: 'POST',
+        body: JSON.stringify({ model }),
+      });
+    },
     async getAssignments() {
       return request('/admin/llm-config/assignments');
     },
