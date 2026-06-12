@@ -31,7 +31,7 @@ async def get_db():
 
 async def create_tables():
     # Import all models to ensure they are registered
-    from app.models import user, project, llm_config  # noqa: F401
+    from app.models import user, project, llm_config, department, workflow_event  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     print("✅ Tables créées")

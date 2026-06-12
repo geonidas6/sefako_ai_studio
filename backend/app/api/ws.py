@@ -1,19 +1,17 @@
-"""
-WebSocket endpoint for real-time streaming of agent workflow.
+"""WebSocket endpoint for observing project workflow events.
 
-Client connects to: ws://localhost:8000/ws/projects/{project_id}
-Then sends: {"action": "start"}
-Server streams: events (agent_start, agent_complete, round_complete, workflow_complete, ...)
+The workflow itself runs as a backend task started through the REST API.
+This socket only replays persisted history and streams new events, so closing
+the browser no longer stops the analysis.
 """
 import asyncio
-import json
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
+
+from fastapi import APIRouter, WebSocket
 from sqlalchemy import select
 
-from app.db.database import get_db, AsyncSessionLocal
+from app.core.workflow_runner import get_project_events, subscribe_project, unsubscribe_project
+from app.db.database import AsyncSessionLocal
 from app.models.project import Project
-from app.agents.orchestrator import run_project_workflow
 
 router = APIRouter()
 
@@ -22,7 +20,6 @@ router = APIRouter()
 async def project_websocket(project_id: str, websocket: WebSocket):
     await websocket.accept()
 
-    # Verify project exists
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Project).where(Project.id == project_id))
         project = result.scalar_one_or_none()
@@ -32,70 +29,30 @@ async def project_websocket(project_id: str, websocket: WebSocket):
         await websocket.close()
         return
 
-    # If already completed, send existing results
-    if project.status == "completed" and project.final_deliverables:
-        await websocket.send_json({
-            "type": "workflow_complete",
-            "deliverables": project.final_deliverables,
-        })
-        await websocket.close()
-        return
-
+    queue = await subscribe_project(project_id)
     try:
-        # Wait for "start" action from client
-        data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
-        msg = json.loads(data)
-        if msg.get("action") != "start":
-            await websocket.send_json({"type": "error", "message": "Action invalide"})
-            await websocket.close()
-            return
-    except asyncio.TimeoutError:
-        await websocket.send_json({"type": "error", "message": "Timeout d'attente"})
-        await websocket.close()
-        return
+        history = await get_project_events(project_id)
+        for event in history:
+            await websocket.send_json(event)
 
-    # Set up event streaming
-    event_queue: asyncio.Queue = asyncio.Queue()
+        if project.status == "completed" and project.final_deliverables and not any(e.get("type") == "workflow_complete" for e in history):
+            await websocket.send_json({
+                "type": "workflow_complete",
+                "deliverables": project.final_deliverables,
+            })
 
-    async def stream_events():
-        """Forward events from queue to WebSocket."""
         while True:
             try:
-                event = await asyncio.wait_for(event_queue.get(), timeout=120)
-                if event is None:  # sentinel
-                    break
+                event = await asyncio.wait_for(queue.get(), timeout=30)
                 await websocket.send_json(event)
-                event_queue.task_done()
+                queue.task_done()
             except asyncio.TimeoutError:
                 await websocket.send_json({"type": "ping"})
-            except WebSocketDisconnect:
-                break
-
-    async def run_workflow():
-        """Run the workflow and push a sentinel when done."""
-        async with AsyncSessionLocal() as db:
-            # Mark as running
-            result = await db.execute(select(Project).where(Project.id == project_id))
-            proj = result.scalar_one_or_none()
-            if proj:
-                proj.status = "running"
-                await db.commit()
-
-        async with AsyncSessionLocal() as db:
-            try:
-                await run_project_workflow(project_id, project.input_text, db, event_queue)
-            except Exception as e:
-                await event_queue.put({"type": "error", "message": str(e)})
-            finally:
-                await event_queue.put(None)  # sentinel to stop streaming
-
-    # Run both concurrently
-    await asyncio.gather(
-        stream_events(),
-        run_workflow(),
-    )
-
-    try:
-        await websocket.close()
     except Exception:
         pass
+    finally:
+        unsubscribe_project(project_id, queue)
+        try:
+            await websocket.close()
+        except Exception:
+            pass

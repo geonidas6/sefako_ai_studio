@@ -105,6 +105,30 @@ export const api = {
     async get(id: string) {
       return request(`/projects/${id}`);
     },
+    async sendMessage(id: string, content: string, author = 'Utilisateur') {
+      return request(`/projects/${id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ content, author }),
+      });
+    },
+    async start(id: string) {
+      return request(`/projects/${id}/start`, {
+        method: 'POST',
+      });
+    },
+    async events(id: string, afterSequence = 0) {
+      return request(`/projects/${id}/events?after_sequence=${afterSequence}`);
+    },
+    async pause(id: string) {
+      return request(`/projects/${id}/pause`, {
+        method: 'POST',
+      });
+    },
+    async restart(id: string) {
+      return request(`/projects/${id}/restart`, {
+        method: 'POST',
+      });
+    },
     async delete(id: string) {
       return request(`/projects/${id}`, {
         method: 'DELETE',
@@ -113,10 +137,40 @@ export const api = {
   },
 
   admin: {
+    async getQwenAuthStatus() {
+      return request('/admin/qwen-auth/status');
+    },
+    async startQwenAuth() {
+      return request('/admin/qwen-auth/start', { method: 'POST' });
+    },
+    async saveQwenCliApiKey(apiKey: string) {
+      return request('/admin/qwen-auth/key', {
+        method: 'POST',
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+    },
+    async getWorkflowSettings() {
+      return request('/admin/workflow-settings');
+    },
+    async updateWorkflowSettings(data: { debate_rounds: number }) {
+      return request('/admin/workflow-settings', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
+    async getDepartments() {
+      return request('/admin/departments');
+    },
+    async updateDepartments(departments: any[]) {
+      return request('/admin/departments', {
+        method: 'PUT',
+        body: JSON.stringify({ departments }),
+      });
+    },
     async getConfigs() {
       return request('/admin/llm-config');
     },
-    async updateConfig(provider: string, data: { is_enabled: boolean; active_model?: string; api_key?: string }) {
+    async updateConfig(provider: string, data: { is_enabled: boolean; active_model?: string; api_key?: string; requests_per_minute?: number }) {
       return request(`/admin/llm-config/${provider}`, {
         method: 'PUT',
         body: JSON.stringify(data),

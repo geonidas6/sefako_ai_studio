@@ -26,9 +26,11 @@ class Settings(BaseSettings):
     # LLM API keys (fallback from env if not set in DB)
     gemini_api_key: str = ""
     grok_api_key: str = ""
+    groq_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     mistral_api_key: str = ""
+    qwen_api_key: str = ""
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000"]

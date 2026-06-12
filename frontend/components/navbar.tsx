@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
-import { LayoutDashboard, PenTool, Settings, Home } from 'lucide-react';
+import { FolderKanban, PenTool, Settings, Home } from 'lucide-react';
 
 export function Navbar() {
   const pathname = usePathname();
@@ -11,6 +11,7 @@ export function Navbar() {
   const navItems = [
     { label: 'Accueil', href: '/', icon: Home },
     { label: 'Studio', href: '/studio', icon: PenTool },
+    { label: 'Projets', href: '/projects', icon: FolderKanban },
     { label: 'Administration', href: '/admin', icon: Settings },
   ];
 

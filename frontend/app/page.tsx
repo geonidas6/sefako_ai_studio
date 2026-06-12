@@ -176,8 +176,8 @@ export default function LandingPage() {
             <h2 className="text-2xl font-bold font-display tracking-tight">Projets Récents</h2>
           </div>
           <Button variant="ghost" size="sm" asChild>
-            <Link href="/studio" className="flex items-center gap-1.5">
-              Nouveau projet <ChevronRight className="h-4 w-4" />
+            <Link href="/projects" className="flex items-center gap-1.5">
+              Voir tous les projets <ChevronRight className="h-4 w-4" />
             </Link>
           </Button>
         </div>
@@ -225,11 +225,13 @@ export default function LandingPage() {
                           project.status === 'completed' ? "bg-emerald-500/10 text-emerald-500" :
                           project.status === 'running' ? "bg-primary/10 text-primary animate-pulse" :
                           project.status === 'failed' ? "bg-destructive/10 text-destructive" :
+                          project.status === 'paused' ? "bg-amber-500/10 text-amber-500" :
                           "bg-muted text-muted-foreground"
                         )}>
                           {project.status === 'completed' ? 'Terminé' : 
                            project.status === 'running' ? 'En cours' : 
-                           project.status === 'failed' ? 'Échoué' : 'En attente'}
+                           project.status === 'failed' ? 'Échoué' :
+                           project.status === 'paused' ? 'En pause' : 'En attente'}
                         </span>
                         <span className="text-[10px] text-muted-foreground font-medium">
                           {new Date(project.created_at).toLocaleDateString('fr-FR')}
@@ -275,6 +277,7 @@ export default function LandingPage() {
           </div>
           <div className="flex gap-10 text-sm font-medium">
             <Link href="/studio" className="hover:text-primary transition-colors">Studio</Link>
+            <Link href="/projects" className="hover:text-primary transition-colors">Projets</Link>
             <Link href="/admin" className="hover:text-primary transition-colors">Administration</Link>
             <a href="#" className="hover:text-primary transition-colors">Documentation</a>
           </div>

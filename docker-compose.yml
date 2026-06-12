@@ -32,11 +32,15 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROK_API_KEY: ${GROK_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000","https://sefako-ai-studio.it-sefako.com"]}
       DEBUG: ${DEBUG:-false}
+    volumes:
+      - qwen_config:/root/.qwen
     expose:
       - "8000"
     depends_on:
@@ -68,3 +72,4 @@ services:
 
 volumes:
   postgres_data:
+  qwen_config:

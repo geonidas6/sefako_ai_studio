@@ -1,9 +1,9 @@
 """
-LangGraph Orchestrator — 3-round multi-agent workflow.
+LangGraph Orchestrator — checkpointed multi-agent workflow.
 
-Round 1: 4 agents produce initial analysis in parallel.
-Round 2: Each agent critiques the others.
-Round 3: Orchestrator synthesizes into final deliverables.
+Round 1: departments produce initial analysis.
+Round 2..N: departments run configurable cross-critiques/debate rounds.
+Final round: orchestrator synthesizes into final deliverables.
 
 Events are streamed via asyncio.Queue for WebSocket delivery.
 """
@@ -15,9 +15,17 @@ from datetime import datetime, timezone
 from typing import TypedDict, Optional, Any
 
 from langgraph.graph import StateGraph, START, END
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.agency import get_employee_profiles
 from app.core.llm_router import LLMRouter
+from app.models.workflow_event import WorkflowEvent
+
+
+class WorkflowPaused(Exception):
+    """Raised when a user pauses a running workflow."""
+
 
 
 # ──────────────────────────────────────────────
@@ -74,6 +82,49 @@ Produis un JSON structuré avec les clés: cdc, mcd, architecture, roadmap, note
 }
 
 
+
+EMPLOYEES = {
+    "strategy": {
+        "lead": {"name": "Aminata", "role": "Lead Growth", "avatar": "AG"},
+        "reviewer": {"name": "Noam", "role": "Analyste marché", "avatar": "NM"},
+        "label": "Stratégie",
+    },
+    "ux": {
+        "lead": {"name": "Maya", "role": "UX Researcher", "avatar": "UX"},
+        "reviewer": {"name": "Lina", "role": "Product Designer", "avatar": "PD"},
+        "label": "UX",
+    },
+    "engineering": {
+        "lead": {"name": "Elias", "role": "Architecte logiciel", "avatar": "AR"},
+        "reviewer": {"name": "Sara", "role": "Data modeler", "avatar": "DB"},
+        "label": "Ingénierie",
+    },
+    "devops": {
+        "lead": {"name": "Karim", "role": "DevSecOps", "avatar": "DS"},
+        "reviewer": {"name": "Inès", "role": "Cloud engineer", "avatar": "CE"},
+        "label": "DevOps",
+    },
+    "orchestrator": {
+        "lead": {"name": "Sefako Orchestrateur", "role": "Chef de projet IA", "avatar": "SO"},
+        "reviewer": {"name": "Sefako Orchestrateur", "role": "Chef de projet IA", "avatar": "SO"},
+        "label": "Orchestrateur",
+    },
+}
+
+
+def excerpt(text: str, limit: int = 260) -> str:
+    clean = " ".join((text or "").split())
+    if len(clean) <= limit:
+        return clean
+    return f"{clean[:limit].rstrip()}..."
+
+
+def clamp_text(text: str, limit: int) -> str:
+    clean = (text or "").strip()
+    if len(clean) <= limit:
+        return clean
+    return f"{clean[:limit].rstrip()}\n\n[Contenu tronqué automatiquement pour maîtriser les tokens et éviter les erreurs API.]"
+
 # ──────────────────────────────────────────────
 # Agent node functions
 # ──────────────────────────────────────────────
@@ -82,53 +133,53 @@ def make_r1_prompt(input_text: str, agent: str) -> str:
     return f"""Voici la description du projet à analyser:
 
 ---
-{input_text}
+{clamp_text(input_text, 5000)}
 ---
 
-Produis ton analyse complète en tant que Département {agent.upper()}. 
-Sois exhaustif, structuré et actionnable."""
+Produis ton analyse complète en tant que Département {agent.upper()}.
+Limite ta réponse à 900 mots maximum. Sois structuré et actionnable, sans répétition."""
 
 
 def make_critique_prompt(input_text: str, my_analysis: str, other_analyses: dict, agent: str) -> str:
     others_text = "\n\n".join([
-        f"### Département {k.upper()}\n{v}"
+        f"### Département {k.upper()}\n{clamp_text(v, 1400)}"
         for k, v in other_analyses.items()
     ])
     return f"""Projet analysé:
-{input_text}
+{clamp_text(input_text, 3500)}
 
 Ton analyse initiale (Département {agent.upper()}):
-{my_analysis}
+{clamp_text(my_analysis, 1600)}
 
-Analyses des autres départements:
+Analyses synthétisées des autres départements:
 {others_text}
 
-Ta mission: 
+Ta mission:
 1. Valide ce qui est cohérent avec ta vision.
-2. Identifie les contradictions ou risques que les autres n'ont pas vus.
-3. Propose des ajustements si nécessaire.
-Sois direct et constructif."""
+2. Identifie les contradictions ou risques majeurs.
+3. Propose des ajustements.
+Limite ta critique à 500 mots maximum. Sois direct et constructif."""
 
 
 def make_synthesis_prompt(input_text: str, r1: dict, critiques: dict) -> str:
-    r1_text = "\n\n".join([f"### {k.upper()}\n{v}" for k, v in r1.items()])
-    critiques_text = "\n\n".join([f"### Critique {k.upper()}\n{v}" for k, v in critiques.items()])
+    r1_text = "\n\n".join([f"### {k.upper()}\n{clamp_text(v, 1800)}" for k, v in r1.items()])
+    critiques_text = "\n\n".join([f"### Critique {k.upper()}\n{clamp_text(v, 1200)}" for k, v in critiques.items()])
 
     return f"""Tu dois synthétiser les travaux de 4 départements IA sur ce projet:
 
 PROJET:
-{input_text}
+{clamp_text(input_text, 3500)}
 
-ANALYSES INITIALES (Round 1):
+ANALYSES INITIALES SYNTHÉTISÉES (Round 1):
 {r1_text}
 
-CRITIQUES CROISÉES (Round 2):
+CRITIQUES CROISÉES SYNTHÉTISÉES (Round 2):
 {critiques_text}
 
 Produis maintenant un JSON valide (sans markdown, juste le JSON brut) avec cette structure exacte:
 {{
   "cdc": "Cahier des charges complet en Markdown",
-  "mcd": "Description du MCD en Markdown avec les entités et relations",
+  "mcd": "Description du MCD en Markdown. Inclus obligatoirement un bloc fenced Mermaid commençant par ```mermaid puis erDiagram, avec les entités, attributs et relations principales.",
   "architecture": "Architecture technique en Markdown",
   "roadmap": "Roadmap détaillée en Markdown",
   "notes_synthese": "Notes de synthèse et points d'attention"
@@ -139,36 +190,175 @@ Produis maintenant un JSON valide (sans markdown, juste le JSON brut) avec cette
 # Graph builder
 # ──────────────────────────────────────────────
 
-def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue):
+def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue, cancel_event: asyncio.Event | None = None):
     """Build and return a compiled LangGraph AIA workflow."""
+
+    employee_profiles: dict[str, dict] | None = None
+    workflow_settings_cache: dict[str, int] | None = None
 
     async def emit(event_type: str, **kwargs):
         await event_queue.put({"type": event_type, "timestamp": datetime.now(timezone.utc).isoformat(), **kwargs})
 
+    async def get_profiles() -> dict[str, dict]:
+        nonlocal employee_profiles
+        if employee_profiles is None:
+            db_profiles = await get_employee_profiles(llm_router.db)
+            employee_profiles = {**EMPLOYEES, **db_profiles}
+        return employee_profiles
+
+    async def speak(agent_key: str, employee_key: str, message: str, round: int, phase: str, target: str | None = None):
+        profiles = await get_profiles()
+        profile_group = profiles.get(agent_key, EMPLOYEES[agent_key])
+        profile = profile_group.get(employee_key) or profile_group.get("lead") or EMPLOYEES[agent_key]["lead"]
+        await emit(
+            "employee_message",
+            agent=agent_key,
+            department=profile_group.get("label", EMPLOYEES[agent_key]["label"]),
+            employee=profile,
+            message=message,
+            round=round,
+            phase=phase,
+            target=target,
+        )
+
+    def ensure_not_paused():
+        if cancel_event and cancel_event.is_set():
+            raise WorkflowPaused("Analyse mise en pause par l'utilisateur.")
+
+    async def get_debate_rounds() -> int:
+        nonlocal workflow_settings_cache
+        if workflow_settings_cache is not None:
+            return workflow_settings_cache["debate_rounds"]
+
+        from app.models.llm_config import LLMConfig
+
+        result = await llm_router.db.execute(
+            select(LLMConfig).where(LLMConfig.provider == "workflow_debate_rounds")
+        )
+        cfg = result.scalar_one_or_none()
+        try:
+            configured = int((cfg.value if cfg else None) or 1)
+        except (TypeError, ValueError):
+            configured = 1
+        workflow_settings_cache = {"debate_rounds": max(1, min(configured, 3))}
+        return workflow_settings_cache["debate_rounds"]
+
+    async def persist_project_field(project_id: str, field: str, value: Any) -> None:
+        from app.models.project import Project
+
+        result = await llm_router.db.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+        if not project:
+            return
+        setattr(project, field, value)
+        project.completed_at = None
+        await llm_router.db.commit()
+
+    async def persist_project_critique(project_id: str, agent_key: str, value: str) -> None:
+        from app.models.project import Project
+
+        result = await llm_router.db.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+        if not project:
+            return
+        critiques = dict(project.critiques or {})
+        critiques[agent_key] = value
+        project.critiques = critiques
+        project.completed_at = None
+        await llm_router.db.commit()
+
+    async def enriched_input(state: AiaState) -> str:
+        result = await llm_router.db.execute(
+            select(WorkflowEvent)
+            .where(WorkflowEvent.project_id == state["project_id"], WorkflowEvent.event_type == "user_message")
+            .order_by(WorkflowEvent.sequence)
+        )
+        messages = result.scalars().all()
+        additions = []
+        for event in messages:
+            payload = event.payload or {}
+            content = (payload.get("content") or payload.get("message") or "").strip()
+            if content:
+                author = payload.get("author") or "Utilisateur"
+                additions.append(f"- {author}: {content}")
+
+        memory_items = [
+            ("Analyse Stratégie déjà produite", state.get("strategy_r1")),
+            ("Analyse UX déjà produite", state.get("ux_r1")),
+            ("Analyse Ingénierie déjà produite", state.get("engineering_r1")),
+            ("Analyse DevOps déjà produite", state.get("devops_r1")),
+            ("Critique Stratégie déjà produite", state.get("strategy_critique")),
+            ("Critique UX déjà produite", state.get("ux_critique")),
+            ("Critique Ingénierie déjà produite", state.get("engineering_critique")),
+            ("Critique DevOps déjà produite", state.get("devops_critique")),
+        ]
+        memory = [
+            f"### {title}\\n{clamp_text(value, 900)}"
+            for title, value in memory_items
+            if isinstance(value, str) and value.strip()
+        ]
+
+        sections = []
+        if additions:
+            sections.append("INFORMATIONS COMPLEMENTAIRES FOURNIES PAR L'UTILISATEUR PENDANT L'ANALYSE:\\n" + chr(10).join(additions))
+        if memory:
+            sections.append("MEMOIRE DE REPRISE / CHECKPOINTS DEJA PRODUITS:\\n" + "\\n\\n".join(memory))
+
+        if not sections:
+            return state["input_text"]
+        return f"""{state["input_text"]}
+
+---
+{chr(10).join(sections)}
+---
+Tu dois tenir compte de cette mémoire et continuer le travail sans répéter inutilement ce qui est déjà acquis."""
+
     async def round1_node(state: AiaState) -> dict:
-        await emit("round_start", round=1, message="Lancement des analyses initiales...")
+        ensure_not_paused()
+        profiles = await get_profiles()
+        await emit("round_start", round=1, message="Lancement ou reprise des analyses initiales...")
+        await speak("orchestrator", "lead", "J'affecte le projet aux départements. Les analyses déjà produites sont reprises comme checkpoints, puis les équipes restantes complètent le travail.", 1, "system_step")
+
+        fields = {
+            "strategy": "strategy_r1",
+            "ux": "ux_r1",
+            "engineering": "engineering_r1",
+            "devops": "devops_r1",
+        }
+        results_by_agent = {agent: (state.get(field) or "") for agent, field in fields.items()}
 
         async def run_agent(agent_key: str) -> str:
+            ensure_not_paused()
+            existing = (results_by_agent.get(agent_key) or "").strip()
+            if existing:
+                await emit("agent_complete", agent=agent_key, round=1, preview=existing[:200], content=existing, resumed=True)
+                await speak(agent_key, "lead", f"Checkpoint retrouvé : je conserve l'analyse déjà produite. Extrait : {excerpt(existing)}", 1, "checkpoint")
+                return existing
+
             await emit("agent_start", agent=agent_key, round=1)
+            await speak(agent_key, "lead", f"Mission reçue. L'équipe {profiles[agent_key]['label']} démarre l'analyse du besoin et prépare ses hypothèses.", 1, "system_step")
+            await speak(agent_key, "reviewer", "Je surveille les angles morts et je prépare les points à challenger au round suivant.", 1, "system_step")
             try:
                 result = await llm_router.generate(
-                    make_r1_prompt(state["input_text"], agent_key),
+                    make_r1_prompt(await enriched_input(state), agent_key),
                     agent_key,
                     SYSTEM_PROMPTS[agent_key],
                 )
-                await emit("agent_complete", agent=agent_key, round=1, preview=result[:200])
+                await persist_project_field(state["project_id"], fields[agent_key], result)
+                await emit("agent_complete", agent=agent_key, round=1, preview=result[:200], content=result)
+                await speak(agent_key, "lead", f"Analyse initiale prête : {excerpt(result)}", 1, "result")
+                await speak(agent_key, "reviewer", "Je transmets cette proposition aux autres départements pour critique contradictoire.", 1, "system_step")
                 return result
             except Exception as e:
-                await emit("agent_error", agent=agent_key, error=str(e))
-                return f"Erreur agent {agent_key}: {e}"
+                await emit("agent_error", agent=agent_key, round=1, error=str(e))
+                raise
 
-        results = await asyncio.gather(
-            run_agent("strategy"),
-            run_agent("ux"),
-            run_agent("engineering"),
-            run_agent("devops"),
-        )
+        ordered_agents = ["strategy", "ux", "engineering", "devops"]
+        results = []
+        for agent_key in ordered_agents:
+            results.append(await run_agent(agent_key))
 
+        ensure_not_paused()
         await emit("round_complete", round=1)
         return {
             "strategy_r1": results[0],
@@ -178,7 +368,9 @@ def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue):
         }
 
     async def round2_node(state: AiaState) -> dict:
-        await emit("round_start", round=2, message="Critiques croisées entre départements...")
+        ensure_not_paused()
+        profiles = await get_profiles()
+        debate_rounds = await get_debate_rounds()
 
         r1_outputs = {
             "strategy": state["strategy_r1"],
@@ -186,47 +378,89 @@ def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue):
             "engineering": state["engineering_r1"],
             "devops": state["devops_r1"],
         }
-
-        async def run_critique(agent_key: str) -> str:
-            await emit("agent_start", agent=agent_key, round=2)
-            others = {k: v for k, v in r1_outputs.items() if k != agent_key}
-            try:
-                result = await llm_router.generate(
-                    make_critique_prompt(state["input_text"], r1_outputs[agent_key], others, agent_key),
-                    agent_key,
-                    SYSTEM_PROMPTS[agent_key],
-                )
-                await emit("agent_complete", agent=agent_key, round=2, preview=result[:150])
-                return result
-            except Exception as e:
-                await emit("agent_error", agent=agent_key, error=str(e))
-                return f"[Critique non disponible: {e}]"
-
-        results = await asyncio.gather(
-            run_critique("strategy"),
-            run_critique("ux"),
-            run_critique("engineering"),
-            run_critique("devops"),
-        )
-
-        critiques = {
-            "strategy": results[0],
-            "ux": results[1],
-            "engineering": results[2],
-            "devops": results[3],
+        existing_critiques = {
+            "strategy": state.get("strategy_critique", "") or "",
+            "ux": state.get("ux_critique", "") or "",
+            "engineering": state.get("engineering_critique", "") or "",
+            "devops": state.get("devops_critique", "") or "",
         }
 
-        await emit("round_complete", round=2)
+        if all(value.strip() for value in existing_critiques.values()):
+            await emit("round_start", round=2, message="Critiques déjà disponibles, reprise depuis checkpoint...")
+            await speak("orchestrator", "lead", "Les critiques croisées sont déjà sauvegardées. Je reprends directement à partir de cette mémoire de travail.", 2, "checkpoint")
+            await emit("round_complete", round=2, resumed=True)
+            return {
+                "strategy_critique": existing_critiques["strategy"],
+                "ux_critique": existing_critiques["ux"],
+                "engineering_critique": existing_critiques["engineering"],
+                "devops_critique": existing_critiques["devops"],
+                "critiques": existing_critiques,
+            }
+
+        current_outputs = r1_outputs
+        final_critiques = dict(existing_critiques)
+
+        for debate_index in range(debate_rounds):
+            round_number = 2 + debate_index
+            await emit("round_start", round=round_number, message=f"Débat critique {debate_index + 1}/{debate_rounds} entre départements...")
+            await speak("orchestrator", "lead", f"Round de débat {debate_index + 1}/{debate_rounds}. Chaque équipe doit lire les propositions des autres, formuler ses objections et défendre ses arbitrages.", round_number, "system_step")
+
+            async def run_critique(agent_key: str) -> str:
+                ensure_not_paused()
+                if debate_rounds == 1 and final_critiques.get(agent_key, "").strip():
+                    existing = final_critiques[agent_key]
+                    await emit("agent_complete", agent=agent_key, round=round_number, preview=existing[:150], content=existing, resumed=True)
+                    await speak(agent_key, "lead", f"Critique déjà sauvegardée, je la conserve : {excerpt(existing)}", round_number, "checkpoint", target="orchestrateur")
+                    return existing
+
+                await emit("agent_start", agent=agent_key, round=round_number)
+                others = {k: v for k, v in current_outputs.items() if k != agent_key}
+                base = current_outputs.get(agent_key) or r1_outputs[agent_key]
+                await speak(agent_key, "lead", "Je relis les positions des autres départements et je cherche les contradictions concrètes.", round_number, "system_step")
+                await speak(agent_key, "reviewer", f"Je challenge surtout {', '.join(profiles[key]['label'] for key in others.keys())} pour sécuriser notre consensus.", round_number, "system_step", target="autres départements")
+                try:
+                    result = await llm_router.generate(
+                        make_critique_prompt(await enriched_input(state), base, others, agent_key),
+                        agent_key,
+                        SYSTEM_PROMPTS[agent_key],
+                    )
+                    await persist_project_critique(state["project_id"], agent_key, result)
+                    await emit("agent_complete", agent=agent_key, round=round_number, preview=result[:150], content=result)
+                    await speak(agent_key, "lead", f"Critique formulée : {excerpt(result)}", round_number, "critique_result", target="orchestrateur")
+                    return result
+                except Exception as e:
+                    await emit("agent_error", agent=agent_key, round=round_number, error=str(e))
+                    raise
+
+            round_results = {}
+            for agent_key in ["strategy", "ux", "engineering", "devops"]:
+                round_results[agent_key] = await run_critique(agent_key)
+
+            final_critiques = round_results
+            current_outputs = round_results
+            ensure_not_paused()
+            await emit("round_complete", round=round_number)
+
         return {
-            "strategy_critique": critiques["strategy"],
-            "ux_critique": critiques["ux"],
-            "engineering_critique": critiques["engineering"],
-            "devops_critique": critiques["devops"],
-            "critiques": critiques,
+            "strategy_critique": final_critiques["strategy"],
+            "ux_critique": final_critiques["ux"],
+            "engineering_critique": final_critiques["engineering"],
+            "devops_critique": final_critiques["devops"],
+            "critiques": final_critiques,
         }
 
     async def round3_node(state: AiaState) -> dict:
-        await emit("round_start", round=3, message="Synthèse finale en cours...")
+        ensure_not_paused()
+        final_round = 2 + await get_debate_rounds()
+        existing_deliverables = state.get("final_deliverables") or {}
+        if existing_deliverables and not existing_deliverables.get("error"):
+            await emit("round_start", round=final_round, message="Livrables déjà disponibles, reprise depuis checkpoint...")
+            await speak("orchestrator", "lead", "Les livrables consolidés existent déjà. Je les conserve au lieu de régénérer inutilement.", final_round, "checkpoint")
+            await emit("workflow_complete", deliverables=existing_deliverables, resumed=True)
+            return {"final_deliverables": existing_deliverables}
+
+        await emit("round_start", round=final_round, message="Synthèse finale en cours...")
+        await speak("orchestrator", "lead", "Je récupère les analyses et les objections. Je vais arbitrer les contradictions et produire les livrables finaux.", final_round, "system_step")
 
         r1 = {
             "strategy": state["strategy_r1"],
@@ -243,37 +477,33 @@ def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue):
 
         try:
             raw = await llm_router.generate(
-                make_synthesis_prompt(state["input_text"], r1, critiques),
+                make_synthesis_prompt(await enriched_input(state), r1, critiques),
                 "orchestrator",
                 SYSTEM_PROMPTS["orchestrator"],
             )
 
-            # Try to parse JSON from the response
+            # Parse JSON from the response. Invalid JSON is a real workflow error,
+            # not a reason to generate synthetic/static fallback deliverables.
+            clean = raw.strip()
+            if clean.startswith("```"):
+                clean = "\n".join(clean.split("\n")[1:])
+                if clean.endswith("```"):
+                    clean = clean[:-3]
             try:
-                # Handle cases where LLM wraps JSON in markdown
-                clean = raw.strip()
-                if clean.startswith("```"):
-                    clean = "\n".join(clean.split("\n")[1:])
-                    if clean.endswith("```"):
-                        clean = clean[:-3]
                 deliverables = json.loads(clean.strip())
-            except json.JSONDecodeError:
-                # Fallback: treat as plain text
-                deliverables = {
-                    "cdc": raw,
-                    "mcd": "Voir l'analyse du département Ingénierie.",
-                    "architecture": r1.get("engineering", ""),
-                    "roadmap": "À définir selon les priorités validées.",
-                    "notes_synthese": "Synthèse générée en mode dégradé.",
-                }
+            except json.JSONDecodeError as e:
+                raise RuntimeError("L'orchestrateur IA n'a pas retourné un JSON valide pour les livrables.") from e
 
-            await emit("round_complete", round=3)
+            ensure_not_paused()
+            await persist_project_field(state["project_id"], "final_deliverables", deliverables)
+            await emit("round_complete", round=final_round)
+            await speak("orchestrator", "lead", "Consensus obtenu. Les livrables consolidés sont prêts pour validation humaine.", final_round, "complete")
             await emit("workflow_complete", deliverables=deliverables)
             return {"final_deliverables": deliverables}
 
         except Exception as e:
             await emit("workflow_error", error=str(e))
-            return {"error": str(e), "final_deliverables": {}}
+            raise
 
     # Build the graph
     graph = StateGraph(AiaState)
@@ -298,6 +528,7 @@ async def run_project_workflow(
     input_text: str,
     db: AsyncSession,
     event_queue: asyncio.Queue,
+    cancel_event: asyncio.Event | None = None,
 ) -> dict:
     """
     Run the full 3-round AIA workflow for a project.
@@ -305,23 +536,25 @@ async def run_project_workflow(
     Returns final deliverables.
     """
     from app.models.project import Project
-    from sqlalchemy import select
-
     llm_router = LLMRouter(db)
-    graph = build_graph(llm_router, event_queue)
+    graph = build_graph(llm_router, event_queue, cancel_event)
+
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    critiques = dict(project.critiques or {}) if project else {}
 
     initial_state: AiaState = {
         "project_id": project_id,
         "input_text": input_text,
-        "strategy_r1": "",
-        "ux_r1": "",
-        "engineering_r1": "",
-        "devops_r1": "",
-        "strategy_critique": "",
-        "ux_critique": "",
-        "engineering_critique": "",
-        "devops_critique": "",
-        "final_deliverables": {},
+        "strategy_r1": (project.strategy_r1 if project else None) or "",
+        "ux_r1": (project.ux_r1 if project else None) or "",
+        "engineering_r1": (project.engineering_r1 if project else None) or "",
+        "devops_r1": (project.devops_r1 if project else None) or "",
+        "strategy_critique": critiques.get("strategy", "") or "",
+        "ux_critique": critiques.get("ux", "") or "",
+        "engineering_critique": critiques.get("engineering", "") or "",
+        "devops_critique": critiques.get("devops", "") or "",
+        "final_deliverables": (project.final_deliverables if project else None) or {},
         "error": None,
     }
 
@@ -349,11 +582,24 @@ async def run_project_workflow(
 
         return final_state.get("final_deliverables", {})
 
+    except WorkflowPaused as e:
+        result = await db.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+        if project:
+            project.status = "paused"
+            project.final_deliverables = {"error": str(e)}
+            project.completed_at = None
+            await db.commit()
+        await event_queue.put({"type": "workflow_paused", "message": str(e)})
+        raise
+
     except Exception as e:
         # Update project as failed
         result = await db.execute(select(Project).where(Project.id == project_id))
         project = result.scalar_one_or_none()
         if project:
             project.status = "failed"
+            project.final_deliverables = {"error": str(e)}
+            project.completed_at = None
             await db.commit()
         raise

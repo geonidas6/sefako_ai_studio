@@ -33,6 +33,34 @@ Si tu déploies sans Traefik, lance simplement :
 docker compose up -d --build
 ```
 
+### Mode développement sans rebuild
+
+Pour modifier le backend ou le frontend sans reconstruire les images à chaque changement, utilise l'override de développement :
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml up -d
+```
+
+Ce mode active :
+
+- Backend FastAPI en `uvicorn --reload`
+- Montage de `./backend/app` vers `/app/app`
+- Frontend Next.js en `next dev`
+- Montage de `./frontend` vers `/app`
+- Volumes Docker pour garder `node_modules` et `.next`
+
+Si tu ajoutes ou modifies des dépendances Python/Node, il faut quand même reconstruire :
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml up -d --build
+```
+
+Pour revenir au mode production :
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build
+```
+
 ## Services
 
 - Frontend: Next.js

@@ -14,11 +14,19 @@ import {
   Loader2, 
   CheckCircle2, 
   AlertCircle,
+  Bot,
   BookOpen,
   Database,
   Layers,
   Calendar,
-  ClipboardList
+  ClipboardList,
+  Send,
+  Users,
+  Activity,
+  Sparkles,
+  PanelRightOpen,
+  X,
+  GitBranch
 } from 'lucide-react';
 import { api } from '../../../lib/api';
 import { connectProjectWs, WsEvent } from '../../../lib/websocket';
@@ -48,6 +56,231 @@ function parseMarkdown(md: string = ''): string {
   }).join('');
 }
 
+
+declare global {
+  interface Window {
+    mermaid?: {
+      initialize: (config: Record<string, unknown>) => void;
+      render: (id: string, definition: string) => Promise<{ svg: string }>;
+    };
+  }
+}
+
+function extractMermaidDiagram(content: string = ''): string {
+  const fenced = content.match(/```mermaid\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) return fenced[1].trim();
+
+  const start = content.indexOf('erDiagram');
+  if (start === -1) return '';
+  const lines = content.slice(start).split('\n');
+  const collected: string[] = [];
+  for (const line of lines) {
+    if (collected.length > 0 && line.trim() === '') break;
+    if (collected.length > 0 && /^#{1,6}\s/.test(line)) break;
+    collected.push(line);
+  }
+  return collected.join('\n').trim();
+}
+
+function buildFallbackErDiagram(content: string = '', projectText: string = ''): string {
+  const source = `${content} ${projectText}`.toLowerCase();
+  const isLearning = /e-learning|learning|cours|quiz|apprenant|tuteur|chatbot|leçon/.test(source);
+  const isMarketplace = /freelance|client|mission|prestation|contrat/.test(source);
+  const isRestaurant = /restaurant|facture|stock|commande|fournisseur/.test(source);
+
+  if (isLearning) {
+    return `erDiagram
+  USER ||--o{ ENROLLMENT : suit
+  COURSE ||--o{ ENROLLMENT : contient
+  COURSE ||--o{ LESSON : organise
+  LESSON ||--o{ QUIZ : valide
+  QUIZ ||--o{ QUESTION : contient
+  USER ||--o{ QUIZ_ATTEMPT : realise
+  USER ||--o{ CHAT_SESSION : dialogue
+  CHAT_SESSION ||--o{ CHAT_MESSAGE : contient
+
+  USER {
+    uuid id PK
+    string email
+    string role
+    datetime created_at
+  }
+  COURSE {
+    uuid id PK
+    string title
+    string level
+    string status
+  }
+  LESSON {
+    uuid id PK
+    uuid course_id FK
+    string title
+    text content
+  }
+  QUIZ {
+    uuid id PK
+    uuid lesson_id FK
+    int passing_score
+  }
+  QUESTION {
+    uuid id PK
+    uuid quiz_id FK
+    text prompt
+    text answer
+  }
+  ENROLLMENT {
+    uuid id PK
+    uuid user_id FK
+    uuid course_id FK
+    string progress
+  }
+  QUIZ_ATTEMPT {
+    uuid id PK
+    uuid user_id FK
+    uuid quiz_id FK
+    int score
+  }
+  CHAT_SESSION {
+    uuid id PK
+    uuid user_id FK
+    string context
+  }
+  CHAT_MESSAGE {
+    uuid id PK
+    uuid session_id FK
+    string sender
+    text content
+  }`;
+  }
+
+  if (isRestaurant) {
+    return `erDiagram
+  RESTAURANT ||--o{ INVOICE : importe
+  INVOICE ||--o{ INVOICE_LINE : contient
+  PRODUCT ||--o{ INVOICE_LINE : apparait
+  PRODUCT ||--o{ STOCK_MOVEMENT : genere
+  SUPPLIER ||--o{ PURCHASE_ORDER : recoit
+  PURCHASE_ORDER ||--o{ PURCHASE_ORDER_LINE : contient
+
+  RESTAURANT { uuid id PK string name }
+  INVOICE { uuid id PK uuid restaurant_id FK datetime imported_at }
+  INVOICE_LINE { uuid id PK uuid invoice_id FK uuid product_id FK int quantity }
+  PRODUCT { uuid id PK string name int current_stock int alert_threshold }
+  STOCK_MOVEMENT { uuid id PK uuid product_id FK int quantity string type }
+  SUPPLIER { uuid id PK string name string email }
+  PURCHASE_ORDER { uuid id PK uuid supplier_id FK string status }
+  PURCHASE_ORDER_LINE { uuid id PK uuid order_id FK uuid product_id FK int quantity }`;
+  }
+
+  if (isMarketplace) {
+    return `erDiagram
+  USER ||--o{ PROJECT : cree
+  PROJECT ||--o{ PROPOSAL : recoit
+  FREELANCER ||--o{ PROPOSAL : soumet
+  PROJECT ||--o{ CONTRACT : formalise
+  CONTRACT ||--o{ MILESTONE : planifie
+  MILESTONE ||--o{ DELIVERABLE : produit
+
+  USER { uuid id PK string email string role }
+  FREELANCER { uuid id PK string name string skills }
+  PROJECT { uuid id PK uuid client_id FK string title string status }
+  PROPOSAL { uuid id PK uuid project_id FK uuid freelancer_id FK decimal budget }
+  CONTRACT { uuid id PK uuid project_id FK string status }
+  MILESTONE { uuid id PK uuid contract_id FK string title datetime due_date }
+  DELIVERABLE { uuid id PK uuid milestone_id FK string url string status }`;
+  }
+
+  return `erDiagram
+  USER ||--o{ PROJECT : cree
+  PROJECT ||--o{ REQUIREMENT : contient
+  PROJECT ||--o{ FEATURE : definit
+  FEATURE ||--o{ TASK : decoupe
+  PROJECT ||--o{ DELIVERABLE : produit
+  PROJECT ||--o{ DECISION : trace
+
+  USER { uuid id PK string email string role }
+  PROJECT { uuid id PK string title string status datetime created_at }
+  REQUIREMENT { uuid id PK uuid project_id FK text description string priority }
+  FEATURE { uuid id PK uuid project_id FK string name string status }
+  TASK { uuid id PK uuid feature_id FK string title string status }
+  DELIVERABLE { uuid id PK uuid project_id FK string type text content }
+  DECISION { uuid id PK uuid project_id FK text summary datetime decided_at }`;
+}
+
+function stripMermaidBlocks(content: string = ''): string {
+  return content
+    .replace(/```mermaid\s*[\s\S]*?```/gi, '')
+    .replace(/erDiagram[\s\S]*?(?=\n\n|$)/i, '')
+    .trim();
+}
+
+function MermaidDiagram({ chart }: { chart: string }) {
+  const [svg, setSvg] = useState('');
+  const [error, setError] = useState('');
+  const chartIdRef = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadMermaid() {
+      if (!chart.trim()) return;
+      setError('');
+      setSvg('');
+      try {
+        if (!window.mermaid) {
+          await new Promise<void>((resolve, reject) => {
+            const existing = document.querySelector<HTMLScriptElement>('script[data-mermaid="true"]');
+            if (existing) {
+              existing.addEventListener('load', () => resolve(), { once: true });
+              existing.addEventListener('error', () => reject(new Error('Mermaid indisponible')), { once: true });
+              return;
+            }
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+            script.async = true;
+            script.dataset.mermaid = 'true';
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('Impossible de charger Mermaid'));
+            document.head.appendChild(script);
+          });
+        }
+
+        window.mermaid?.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+        const result = await window.mermaid?.render(`${chartIdRef.current}-${Date.now()}`, chart);
+        if (!cancelled && result?.svg) setSvg(result.svg);
+      } catch (err: any) {
+        if (!cancelled) setError(err.message || 'Diagramme Mermaid invalide');
+      }
+    }
+
+    loadMermaid();
+    return () => { cancelled = true; };
+  }, [chart]);
+
+  if (!chart.trim()) {
+    return (
+      <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-8 text-center text-sm text-muted-foreground">
+        Aucun bloc Mermaid `erDiagram` détecté dans le MCD.
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-3 rounded-2xl border border-destructive/20 bg-destructive/5 p-4">
+        <p className="text-sm font-semibold text-destructive">{error}</p>
+        <pre className="overflow-x-auto whitespace-pre text-xs text-muted-foreground">{chart}</pre>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-[260px] overflow-auto rounded-2xl border border-primary/20 bg-[#090b12] p-4">
+      {svg ? <div className="min-w-[520px]" dangerouslySetInnerHTML={{ __html: svg }} /> : <div className="flex h-64 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-primary" /></div>}
+    </div>
+  );
+}
+
 export default function ProjectDashboard() {
   const params = useParams();
   const projectId = params.id as string;
@@ -57,12 +290,29 @@ export default function ProjectDashboard() {
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<'live' | 'r1' | 'r2' | 'deliverables'>('live');
   const [activeDeliverable, setActiveDeliverable] = useState<'cdc' | 'mcd' | 'architecture' | 'roadmap' | 'notes_synthese'>('cdc');
+  const [deliverablesPanelOpen, setDeliverablesPanelOpen] = useState(false);
 
   const [logs, setLogs] = useState<{ text: string; type?: 'info' | 'success' | 'error' | 'system' }[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [conversation, setConversation] = useState<{
+    kind?: 'agent' | 'user';
+    agent: string;
+    department: string;
+    employee: { name: string; role: string; avatar: string };
+    message: string;
+    round?: number;
+    phase?: string;
+    target?: string;
+    timestamp?: string;
+  }[]>([]);
   const [runningAgents, setRunningAgents] = useState<Record<string, boolean>>({});
-  const [wsStatus, setWsStatus] = useState<'connecting' | 'running' | 'idle' | 'error'>('idle');
+  const [agentStatuses, setAgentStatuses] = useState<Record<string, string>>({});
+  const [wsStatus, setWsStatus] = useState<'connecting' | 'running' | 'idle' | 'error' | 'paused'>('idle');
+  const [currentRound, setCurrentRound] = useState<number | null>(null);
 
   const wsCleanupRef = useRef<(() => void) | null>(null);
+  const seenEventSequencesRef = useRef<Set<number>>(new Set());
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -75,7 +325,7 @@ export default function ProjectDashboard() {
         const data = await api.projects.get(projectId);
         setProject(data);
         if (data.status === 'completed') setActiveTab('deliverables');
-        else if (data.status === 'running' || data.status === 'pending') startStreaming();
+        startStreaming();
       } catch (err: any) {
         setError(err.message || 'Impossible de charger le projet.');
       } finally {
@@ -89,15 +339,14 @@ export default function ProjectDashboard() {
   const startStreaming = () => {
     if (wsCleanupRef.current) wsCleanupRef.current();
     setWsStatus('connecting');
-    setLogs((prev) => [...prev, { text: 'Connexion au canal de streaming...', type: 'system' }]);
+    setLogs((prev) => prev.some((log) => log.text === 'Connexion au canal de streaming...') ? prev : [...prev, { text: 'Connexion au canal de streaming...', type: 'system' }]);
 
     const cleanup = connectProjectWs(projectId, handleWsEvent, () => {
-      setWsStatus('idle');
+      setWsStatus((current) => current === 'running' ? 'connecting' : 'idle');
       refreshProject();
-    }, (err) => {
-      setWsStatus('error');
-      setLogs((prev) => [...prev, { text: 'Connexion interrompue.', type: 'error' }]);
-    });
+    }, () => {
+      refreshProject();
+    }, { reconnect: true });
     wsCleanupRef.current = cleanup;
   };
 
@@ -109,19 +358,140 @@ export default function ProjectDashboard() {
     } catch (err) {}
   };
 
+  const handleStart = async () => {
+    try {
+      await api.projects.start(projectId);
+      setProject((prev: any) => ({ ...prev, status: 'running', final_deliverables: null }));
+      setWsStatus('running');
+      setActiveTab('live');
+      startStreaming();
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || "Impossible de lancer l'analyse.", type: 'error' }]);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    const content = chatInput.trim();
+    if (!content) return;
+    setSendingMessage(true);
+    try {
+      await api.projects.sendMessage(projectId, content);
+      setChatInput('');
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible d’envoyer le message.', type: 'error' }]);
+    } finally {
+      setSendingMessage(false);
+    }
+  };
+
+  const handlePause = async () => {
+    try {
+      await api.projects.pause(projectId);
+      if (wsCleanupRef.current) wsCleanupRef.current();
+      setWsStatus('paused');
+      setRunningAgents({});
+      setAgentStatuses({});
+      setProject((prev: any) => ({
+        ...prev,
+        status: 'paused',
+        final_deliverables: { error: "Analyse mise en pause par l'utilisateur." },
+      }));
+      setLogs((prev) => [...prev, { text: "Analyse mise en pause. Vous pourrez la reprendre plus tard.", type: 'system' }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || "Impossible de mettre l'analyse en pause.", type: 'error' }]);
+    }
+  };
+
+  const handleRestart = async () => {
+    try {
+      const data = await api.projects.restart(projectId);
+      setProject(data);
+      setLogs([]);
+      setConversation([]);
+      seenEventSequencesRef.current.clear();
+      setRunningAgents({});
+      setAgentStatuses({});
+      setActiveTab('live');
+      await api.projects.start(projectId);
+      setProject((prev: any) => ({ ...prev, status: 'running', final_deliverables: null }));
+      startStreaming();
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || "Impossible de relancer l'analyse.", type: 'error' }]);
+    }
+  };
+
   const handleWsEvent = (event: WsEvent) => {
+    if (event.sequence && seenEventSequencesRef.current.has(event.sequence)) return;
+    if (event.sequence) seenEventSequencesRef.current.add(event.sequence);
+
     switch (event.type) {
+      case 'workflow_started':
+        setWsStatus('running');
+        setCurrentRound(null);
+        setProject((prev: any) => ({ ...prev, status: 'running', final_deliverables: null }));
+        setLogs((prev) => [...prev, { text: event.message || 'Analyse lancée côté serveur.', type: 'system' }]);
+        break;
       case 'round_start':
         setWsStatus('running');
+        setCurrentRound(event.round || null);
+        setAgentStatuses((prev) => ({ ...prev, orchestrator: event.message?.toLowerCase().includes('synthèse') ? 'Synthétise' : 'Coordonne' }));
         setLogs((prev) => [...prev, { text: `── ROUND ${event.round} : ${event.message || 'Début'} ──`, type: 'info' }]);
         break;
       case 'agent_start':
         setRunningAgents((prev) => ({ ...prev, [event.agent || '']: true }));
+        setAgentStatuses((prev) => ({ ...prev, [event.agent || '']: (event.round || 1) >= 2 ? 'Réfléchit / critique' : 'Rédige' }));
         setLogs((prev) => [...prev, { text: `[Département ${event.agent?.toUpperCase()}] Début de la rédaction...`, type: 'info' }]);
         break;
       case 'agent_complete':
         setRunningAgents((prev) => ({ ...prev, [event.agent || '']: false }));
+        setAgentStatuses((prev) => ({ ...prev, [event.agent || '']: 'Attend critique' }));
+        if (event.content && event.agent) {
+          const agentKey = event.agent;
+          const content = event.content;
+          setProject((prev: any) => {
+            if (!prev) return prev;
+            if (event.round === 1) {
+              const field = `${agentKey}_r1`;
+              return { ...prev, [field]: content };
+            }
+            if ((event.round || 1) >= 2) {
+              return {
+                ...prev,
+                critiques: { ...(prev.critiques || {}), [agentKey]: content },
+              };
+            }
+            return prev;
+          });
+        }
         setLogs((prev) => [...prev, { text: `[Département ${event.agent?.toUpperCase()}] Rédaction terminée.`, type: 'success' }]);
+        break;
+      case 'user_message':
+        if (event.content || event.message) {
+          setConversation((prev) => [...prev, {
+            kind: 'user',
+            agent: 'user',
+            department: 'Client',
+            employee: { name: event.author || 'Utilisateur', role: 'Client / chef de projet', avatar: 'US' },
+            message: event.content || event.message || '',
+            timestamp: event.timestamp,
+          }]);
+          setLogs((prev) => [...prev, { text: 'Nouvelle contribution utilisateur ajoutée au contexte.', type: 'system' }]);
+        }
+        break;
+      case 'employee_message':
+        if (event.employee && event.message && event.agent && event.department) {
+          setConversation((prev) => [...prev, {
+            kind: 'agent',
+            agent: event.agent || '',
+            department: event.department || '',
+            employee: event.employee!,
+            message: event.message || '',
+            round: event.round,
+            phase: event.phase,
+            target: event.target,
+            timestamp: event.timestamp,
+          }]);
+        }
         break;
       case 'agent_error':
         setRunningAgents((prev) => ({ ...prev, [event.agent || '']: false }));
@@ -130,16 +500,28 @@ export default function ProjectDashboard() {
       case 'workflow_complete':
         setLogs((prev) => [...prev, { text: 'Workflow terminé avec succès !', type: 'success' }]);
         setWsStatus('idle');
+        setCurrentRound(null);
+        setRunningAgents({});
+        setAgentStatuses({ strategy: 'Terminé', ux: 'Terminé', engineering: 'Terminé', devops: 'Terminé', orchestrator: 'Terminé' });
         if (event.deliverables) {
           setProject((prev: any) => ({ ...prev, status: 'completed', final_deliverables: event.deliverables }));
           setActiveTab('deliverables');
         }
         break;
+      case 'workflow_paused':
+        setLogs((prev) => [...prev, { text: event.message || 'Analyse mise en pause.', type: 'system' }]);
+        setWsStatus('paused');
+        setRunningAgents({});
+        setAgentStatuses((prev) => ({ ...prev, orchestrator: 'En pause' }));
+        setProject((prev: any) => ({ ...prev, status: 'paused', final_deliverables: { error: event.message || 'Analyse mise en pause.' } }));
+        break;
       case 'workflow_error':
       case 'error':
         setLogs((prev) => [...prev, { text: `Échec du workflow : ${event.message || event.error}`, type: 'error' }]);
         setWsStatus('error');
-        setProject((prev: any) => ({ ...prev, status: 'failed' }));
+        setRunningAgents({});
+        setAgentStatuses((prev) => ({ ...prev, orchestrator: 'Bloqué' }));
+        setProject((prev: any) => ({ ...prev, status: 'failed', final_deliverables: { error: event.message || event.error } }));
         break;
     }
   };
@@ -158,9 +540,58 @@ export default function ProjectDashboard() {
   );
 
   const deliverables = project.final_deliverables || {};
+  const persistedWorkflowError = project.status === 'failed' ? deliverables.error : '';
+  const employeeRoster = [
+    { agent: 'strategy', department: 'Stratégie', name: 'Aminata', role: 'Lead Growth', avatar: 'AG' },
+    { agent: 'strategy', department: 'Stratégie', name: 'Noam', role: 'Analyste marché', avatar: 'NM' },
+    { agent: 'ux', department: 'UX', name: 'Maya', role: 'UX Researcher', avatar: 'UX' },
+    { agent: 'ux', department: 'UX', name: 'Lina', role: 'Product Designer', avatar: 'PD' },
+    { agent: 'engineering', department: 'Ingénierie', name: 'Elias', role: 'Architecte logiciel', avatar: 'AR' },
+    { agent: 'engineering', department: 'Ingénierie', name: 'Sara', role: 'Data modeler', avatar: 'DB' },
+    { agent: 'devops', department: 'DevOps', name: 'Karim', role: 'DevSecOps', avatar: 'DS' },
+    { agent: 'devops', department: 'DevOps', name: 'Inès', role: 'Cloud engineer', avatar: 'CE' },
+  ];
+  const liveDeliverableCards = [
+    { key: 'cdc', label: 'CDC', value: deliverables.cdc || project.strategy_r1 },
+    { key: 'mcd', label: 'MCD', value: deliverables.mcd || project.engineering_r1 },
+    { key: 'architecture', label: 'Architecture', value: deliverables.architecture || project.devops_r1 },
+    { key: 'roadmap', label: 'Roadmap', value: deliverables.roadmap || project.critiques?.strategy },
+  ];
+  const activeLiveDeliverable = liveDeliverableCards.find((item) => item.key === activeDeliverable)?.value || deliverables[activeDeliverable] || '';
+  const mcdSource = String(deliverables.mcd || project.engineering_r1 || '');
+  const mcdMermaid = extractMermaidDiagram(mcdSource) || buildFallbackErDiagram(mcdSource, project.input_text || '');
+  const hasRound1 = Boolean(project.strategy_r1 || project.ux_r1 || project.engineering_r1 || project.devops_r1);
+  const round1Complete = Boolean(project.strategy_r1 && project.ux_r1 && project.engineering_r1 && project.devops_r1);
+  const critiques = project.critiques || {};
+  const hasRound2 = Boolean(critiques.strategy || critiques.ux || critiques.engineering || critiques.devops);
+  const round2Complete = Boolean(critiques.strategy && critiques.ux && critiques.engineering && critiques.devops);
+  const hasDeliverables = Boolean(deliverables.cdc || deliverables.mcd || deliverables.architecture || deliverables.roadmap);
+
+  const getTabProgress = (tabId: 'live' | 'r1' | 'r2' | 'deliverables') => {
+    if (project.status === 'failed') {
+      if ((tabId === 'r1' && currentRound === 1) || (tabId === 'r2' && (currentRound || 0) >= 2) || (tabId === 'deliverables' && !hasDeliverables)) return 'error';
+    }
+    if (tabId === 'live') return wsStatus === 'running' ? 'running' : project.status === 'completed' ? 'complete' : 'idle';
+    if (tabId === 'r1') return round1Complete ? 'complete' : currentRound === 1 || hasRound1 ? 'running' : 'pending';
+    if (tabId === 'r2') return round2Complete ? 'complete' : (currentRound || 0) >= 2 || hasRound2 ? 'running' : 'pending';
+    if (tabId === 'deliverables') return hasDeliverables || project.status === 'completed' ? 'complete' : currentRound && currentRound >= 3 ? 'running' : 'pending';
+    return 'pending';
+  };
+
+  const renderTabProgress = (status: string) => {
+    if (status === 'complete') return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />;
+    if (status === 'running') return <span className="relative flex h-3.5 w-3.5"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60 opacity-75" /><span className="relative inline-flex h-3.5 w-3.5 rounded-full bg-primary shadow shadow-primary/40" /></span>;
+    if (status === 'error') return <AlertCircle className="h-3.5 w-3.5 text-destructive" />;
+    return <span className="h-2.5 w-2.5 rounded-full border border-muted-foreground/40 bg-muted/40" />;
+  };
 
   return (
-    <div className="flex flex-col min-h-screen">
+    <>
+    <motion.div
+      className="flex flex-col min-h-screen origin-left"
+      animate={{ scale: deliverablesPanelOpen ? 0.985 : 1, x: deliverablesPanelOpen ? -18 : 0 }}
+      transition={{ type: 'spring', stiffness: 260, damping: 28 }}
+    >
       {/* Page Header */}
       <header className="border-b border-border/60 bg-muted/20">
         <div className="max-w-7xl mx-auto px-6 py-8">
@@ -176,25 +607,36 @@ export default function ProjectDashboard() {
                   project.status === 'completed' ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" :
                   project.status === 'running' ? "bg-primary/10 text-primary border border-primary/20 animate-pulse" :
                   project.status === 'failed' ? "bg-destructive/10 text-destructive border border-destructive/20" :
+                  project.status === 'paused' ? "bg-amber-500/10 text-amber-500 border border-amber-500/20" :
                   "bg-muted text-muted-foreground border border-border"
                 )}>
-                  {project.status === 'completed' ? 'Terminé' : project.status === 'running' ? 'En cours' : project.status === 'failed' ? 'Échoué' : 'En attente'}
+                  {project.status === 'completed' ? 'Terminé' : project.status === 'running' ? 'En cours' : project.status === 'failed' ? 'Échoué' : project.status === 'paused' ? 'En pause' : 'En attente'}
                 </span>
               </h1>
               <p className="text-sm text-muted-foreground line-clamp-1 max-w-2xl">{project.input_text}</p>
             </div>
             
             <div className="flex gap-3">
-              {(project.status === 'pending' || project.status === 'failed') && wsStatus === 'idle' && (
-                <Button onClick={startStreaming} className="gap-2">
-                  <Zap className="h-4 w-4" /> Lancer l'Analyse
+              {(project.status === 'pending' || project.status === 'failed' || project.status === 'paused') && wsStatus !== 'running' && (
+                <Button onClick={handleStart} className="gap-2">
+                  <Zap className="h-4 w-4" /> {project.status === 'paused' ? "Reprendre l'analyse" : "Lancer l'Analyse"}
+                </Button>
+              )}
+              {project.status === 'completed' && wsStatus !== 'running' && (
+                <Button onClick={handleRestart} variant="outline" className="gap-2">
+                  <Zap className="h-4 w-4" /> Relancer l'analyse
                 </Button>
               )}
               {wsStatus === 'running' && (
-                <div className="flex items-center gap-2 text-primary text-sm font-semibold px-4 py-2 bg-primary/10 rounded-lg border border-primary/20">
-                  <span className="h-2 w-2 rounded-full bg-primary animate-ping" />
-                  Analyse en cours...
-                </div>
+                <>
+                  <Button onClick={handlePause} variant="outline" className="gap-2">
+                    Mettre en pause
+                  </Button>
+                  <div className="flex items-center gap-2 text-primary text-sm font-semibold px-4 py-2 bg-primary/10 rounded-lg border border-primary/20">
+                    <span className="h-2 w-2 rounded-full bg-primary animate-ping" />
+                    Analyse en cours...
+                  </div>
+                </>
               )}
             </div>
           </div>
@@ -203,78 +645,255 @@ export default function ProjectDashboard() {
 
       {/* Main Workspace */}
       <main className="flex-1 max-w-7xl mx-auto px-6 py-8 w-full flex flex-col gap-8">
+        {(project.status === 'failed' || project.status === 'paused') && (
+          <Card className="border-destructive/30 bg-destructive/5">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-destructive flex items-center gap-2 text-base">
+                <AlertCircle className="h-5 w-5" /> Analyse interrompue
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                {project.status === 'paused'
+                  ? "L'analyse est en pause. Vous pouvez la reprendre plus tard ou la relancer depuis le début."
+                  : "L'analyse a été arrêtée car une erreur réelle est survenue pendant l'appel IA. Aucun résultat Mock n'a été généré."}
+              </p>
+              {persistedWorkflowError && (
+                <pre className="whitespace-pre-wrap rounded-lg border border-destructive/20 bg-background/60 p-4 text-xs text-destructive">
+                  {persistedWorkflowError}
+                </pre>
+              )}
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={handleStart} className="gap-2">
+                  <Zap className="h-4 w-4" /> {project.status === 'paused' ? "Reprendre l'analyse" : "Reprendre depuis checkpoint"}
+                </Button>
+                <Button asChild variant="outline">
+                  <Link href="/admin">Configurer les providers IA</Link>
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Nav Tabs */}
         <div className="flex gap-8 border-b border-border overflow-x-auto scrollbar-none">
           {[
             { id: 'live', label: 'Journal', icon: Terminal },
             { id: 'r1', label: 'Round 1', icon: FileText },
-            { id: 'r2', label: 'Round 2', icon: MessagesSquare },
-            { id: 'deliverables', label: 'Livrables', icon: Trophy, disabled: project.status !== 'completed' },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              disabled={tab.disabled}
-              className={cn(
-                "flex items-center gap-2 pb-4 text-sm font-semibold transition-all border-b-2 disabled:opacity-30 disabled:pointer-events-none whitespace-nowrap",
-                activeTab === tab.id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
-              )}
-            >
-              <tab.icon className="h-4 w-4" />
-              {tab.label}
-            </button>
-          ))}
+            { id: 'r2', label: 'Round 2 Débat', icon: MessagesSquare },
+            { id: 'deliverables', label: 'Round 3 Synthèse', icon: Trophy, disabled: !hasDeliverables && project.status !== 'completed' && (currentRound || 0) < 3 },
+          ].map((tab) => {
+            const progress = getTabProgress(tab.id as any);
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                disabled={tab.disabled}
+                title={progress === 'complete' ? 'Étape terminée' : progress === 'running' ? 'Étape en cours' : progress === 'error' ? 'Étape bloquée' : 'Étape à venir'}
+                className={cn(
+                  "flex items-center gap-2 pb-4 text-sm font-semibold transition-all border-b-2 disabled:opacity-30 disabled:pointer-events-none whitespace-nowrap",
+                  activeTab === tab.id ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+                )}
+              >
+                <tab.icon className="h-4 w-4" />
+                {tab.label}
+                <span className="ml-1 inline-flex h-4 w-4 items-center justify-center">
+                  {renderTabProgress(progress)}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         {/* Tab Contents */}
         <div className="flex-1 min-h-[500px]">
           <AnimatePresence mode="wait">
             {activeTab === 'live' && (
-              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <Card className="lg:col-span-2 bg-black border-border/40 shadow-2xl">
-                  <CardHeader className="border-b border-border/40 py-3 flex flex-row items-center justify-between">
-                    <CardTitle className="text-xs font-mono text-muted-foreground flex items-center gap-2 uppercase tracking-widest">
-                      <Terminal className="h-3.5 w-3.5" /> aia-orchestrator --output-logs
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="grid grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)_360px] gap-6 xl:items-start"
+              >
+                <div className="space-y-6 xl:h-[calc(100vh-230px)] xl:min-h-[980px] xl:flex xl:flex-col">
+                  <Card className="border-border/60 bg-muted/10 xl:shrink-0">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm flex items-center gap-2">
+                        <FileText className="h-4 w-4 text-primary" /> Inputs & données
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="rounded-xl border border-dashed border-border bg-background/60 p-4">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Brief projet</p>
+                        <p className="text-xs leading-relaxed text-muted-foreground line-clamp-[10]">{project.input_text}</p>
+                      </div>
+                      <div className="rounded-xl border border-primary/15 bg-primary/5 p-4 text-xs text-muted-foreground leading-relaxed">
+                        <Sparkles className="h-4 w-4 text-primary mb-2" />
+                        Les messages envoyés dans le chat sont ajoutés au contexte réel des prochains rounds.
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="xl:min-h-[660px] xl:flex-1 xl:flex xl:flex-col">
+                    <CardHeader className="pb-3 xl:shrink-0">
+                      <CardTitle className="text-sm flex items-center gap-2">
+                        <Users className="h-4 w-4 text-primary" /> Employés actifs
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-3 scrollbar-thin scrollbar-thumb-muted-foreground/20">
+                      {employeeRoster.map((employee) => {
+                        const active = runningAgents[employee.agent];
+                        const status = active ? (agentStatuses[employee.agent] || 'Travaille') : (agentStatuses[employee.agent] || 'Disponible');
+                        return (
+                          <div key={`${employee.agent}-${employee.name}`} className="flex items-center gap-3 rounded-xl border border-border/60 bg-muted/25 p-3">
+                            <div className={cn(
+                              'h-9 w-9 rounded-lg border flex items-center justify-center text-[10px] font-bold shrink-0',
+                              active ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-background text-muted-foreground'
+                            )}>
+                              {employee.avatar}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs font-bold truncate">{employee.name}</p>
+                              <p className="text-[10px] text-muted-foreground truncate">{employee.role}</p>
+                            </div>
+                            <span className={cn(
+                              'text-[9px] rounded-full px-2 py-0.5 border whitespace-nowrap',
+                              active ? 'border-primary/20 bg-primary/10 text-primary animate-pulse' :
+                              status === 'Terminé' ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500' :
+                              status === 'Bloqué' ? 'border-destructive/20 bg-destructive/10 text-destructive' :
+                              'border-border bg-background text-muted-foreground'
+                            )}>
+                              {status}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <Card className="border-border/40 shadow-2xl overflow-hidden min-w-0">
+                  <CardHeader className="border-b border-border/40 py-4 flex flex-row items-center justify-between bg-muted/20">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <MessagesSquare className="h-4 w-4 text-primary" /> Débat inter-départements
                     </CardTitle>
-                    <div className="flex gap-1.5">
-                      <div className="h-2.5 w-2.5 rounded-full bg-destructive/50" />
-                      <div className="h-2.5 w-2.5 rounded-full bg-amber-500/50" />
-                      <div className="h-2.5 w-2.5 rounded-full bg-emerald-500/50" />
-                    </div>
+                    <span className="text-[10px] uppercase tracking-widest text-muted-foreground">Chat participatif</span>
                   </CardHeader>
-                  <CardContent className="p-0">
-                    <div className="h-[450px] overflow-y-auto p-4 font-mono text-[11px] leading-relaxed scrollbar-thin scrollbar-thumb-muted-foreground/20">
-                      {logs.map((log, i) => (
-                        <div key={i} className={cn(
-                          "mb-1.5 flex gap-3",
-                          log.type === 'error' ? "text-destructive" :
-                          log.type === 'success' ? "text-emerald-500" :
-                          log.type === 'system' ? "text-primary" : "text-zinc-400"
-                        )}>
-                          <span className="opacity-30 shrink-0">[{new Date().toLocaleTimeString()}]</span>
-                          <span>{log.text}</span>
-                        </div>
+                  <CardContent className="p-0 flex flex-col h-[980px] xl:h-[calc(100vh-230px)] xl:min-h-[980px]">
+                    <div className="flex-1 overflow-y-auto p-5 space-y-4 scrollbar-thin scrollbar-thumb-muted-foreground/20 bg-gradient-to-b from-background to-muted/10">
+                      {conversation.map((item, i) => (
+                        <motion.div
+                          key={`${item.timestamp}-${i}`}
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className={cn(
+                            'flex gap-3',
+                            item.kind === 'user' ? 'justify-end' : item.agent === 'orchestrator' ? 'justify-center' : 'justify-start'
+                          )}
+                        >
+                          {item.kind !== 'user' && (
+                            <div className={cn(
+                              'h-10 w-10 rounded-xl flex items-center justify-center text-[10px] font-bold border shrink-0',
+                              item.agent === 'orchestrator' ? 'bg-primary/15 text-primary border-primary/30' : 'bg-muted text-foreground border-border'
+                            )}>
+                              {item.employee.avatar}
+                            </div>
+                          )}
+                          <div className={cn(
+                            'max-w-[88%] rounded-2xl border p-4 shadow-sm',
+                            item.kind === 'user' ? 'bg-blue-500/10 border-blue-500/25' :
+                            item.phase === 'system_step' ? 'bg-muted/25 border-border/50 opacity-80' :
+                            item.agent === 'orchestrator' ? 'bg-primary/10 border-primary/20' : 'bg-card/80 border-border/60'
+                          )}>
+                            <div className="flex flex-wrap items-center gap-2 mb-2">
+                              <span className="font-bold text-sm">{item.employee.name}</span>
+                              <span className="text-[10px] text-muted-foreground">{item.employee.role}</span>
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-muted border border-border text-muted-foreground">
+                                {item.kind === 'user' ? 'Contribution utilisateur' : item.phase === 'system_step' ? `Étape système${item.round ? ` · Round ${item.round}` : ''}` : `${item.department}${item.round ? ` · Round ${item.round}` : ''}`}
+                              </span>
+                              {item.target && <span className="text-[10px] text-primary">→ {item.target}</span>}
+                            </div>
+                            <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-wrap">{item.message}</p>
+                          </div>
+                        </motion.div>
                       ))}
-                      {logs.length === 0 && <div className="h-full flex flex-col items-center justify-center text-muted-foreground/30 font-sans italic py-20">Attente d'instructions...</div>}
+                      {conversation.length === 0 && (
+                        <div className="h-full flex flex-col items-center justify-center text-center text-muted-foreground/50 py-20">
+                          <Bot className="h-10 w-10 mb-3" />
+                          <p className="font-medium">La salle de réunion est prête.</p>
+                          <p className="text-sm">Lance l'analyse ou ajoute une précision pour participer au travail.</p>
+                        </div>
+                      )}
                       <div ref={logEndRef} />
+                    </div>
+                    <div className="border-t border-border/50 bg-card/95 p-4">
+                      <div className="flex gap-3">
+                        <textarea
+                          value={chatInput}
+                          onChange={(event) => setChatInput(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' && !event.shiftKey) {
+                              event.preventDefault();
+                              handleSendMessage();
+                            }
+                          }}
+                          placeholder="Ajouter une précision, contrainte, correction ou nouvelle exigence..."
+                          className="min-h-[44px] max-h-32 flex-1 resize-none rounded-xl border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                        />
+                        <Button onClick={handleSendMessage} disabled={!chatInput.trim() || sendingMessage} className="h-11 shrink-0 px-4">
+                          {sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      <p className="mt-2 text-[10px] text-muted-foreground">
+                        Entrée pour envoyer, Shift+Entrée pour une nouvelle ligne. Les agents tiendront compte du message aux prochaines étapes.
+                      </p>
                     </div>
                   </CardContent>
                 </Card>
 
-                <div className="space-y-6">
-                  <Card>
-                    <CardHeader><CardTitle className="text-sm">État des Agents</CardTitle></CardHeader>
+                <div className="space-y-6 xl:h-[calc(100vh-230px)] xl:min-h-[980px] xl:flex xl:flex-col">
+                  <Card className="xl:shrink-0">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm flex items-center gap-2">
+                        <Activity className="h-4 w-4 text-primary" /> Livrables vivants
+                      </CardTitle>
+                    </CardHeader>
                     <CardContent className="space-y-3">
-                      {['strategy', 'ux', 'engineering', 'devops'].map((agent) => (
-                        <div key={agent} className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border border-border/50">
-                          <span className="text-xs font-bold capitalize">{agent}</span>
-                          {runningAgents[agent] ? (
-                            <span className="text-[10px] bg-primary/10 text-primary px-2 py-0.5 rounded animate-pulse">En cours</span>
-                          ) : (
-                            <CheckCircle2 className={cn("h-4 w-4", project.status === 'completed' ? "text-emerald-500" : "text-muted-foreground/30")} />
-                          )}
+                      {liveDeliverableCards.map((item) => (
+                        <div key={item.key} className="rounded-xl border border-border/60 bg-muted/20 p-3">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs font-bold">{item.label}</span>
+                            <span className={cn('h-2 w-2 rounded-full', item.value ? 'bg-emerald-500' : 'bg-muted-foreground/30')} />
+                          </div>
+                          <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-4">
+                            {item.value ? String(item.value).replace(/[#*_`>-]/g, '').slice(0, 260) : 'En attente de génération...'}
+                          </p>
                         </div>
                       ))}
+                    </CardContent>
+                  </Card>
+
+                  <Card className="bg-black border-border/40 xl:h-[420px] xl:flex-none xl:flex xl:flex-col">
+                    <CardHeader className="py-3 xl:shrink-0">
+                      <CardTitle className="text-xs font-mono text-muted-foreground flex items-center gap-2 uppercase tracking-widest">
+                        <Terminal className="h-3.5 w-3.5" /> Logs système
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="xl:min-h-0 xl:flex-1">
+                      <div className="h-[360px] xl:h-full overflow-y-auto font-mono text-[10px] leading-relaxed scrollbar-thin scrollbar-thumb-muted-foreground/20">
+                        {logs.map((log, i) => (
+                          <div key={i} className={cn(
+                            'mb-1.5 flex gap-2',
+                            log.type === 'error' ? 'text-destructive' :
+                            log.type === 'success' ? 'text-emerald-500' :
+                            log.type === 'system' ? 'text-primary' : 'text-zinc-400'
+                          )}>
+                            <span className="opacity-30 shrink-0">[{new Date().toLocaleTimeString()}]</span>
+                            <span>{log.text}</span>
+                          </div>
+                        ))}
+                        {logs.length === 0 && <div className="text-muted-foreground/30 italic">Attente d'instructions...</div>}
+                      </div>
                     </CardContent>
                   </Card>
                 </div>
@@ -347,6 +966,108 @@ export default function ProjectDashboard() {
           </AnimatePresence>
         </div>
       </main>
-    </div>
+    </motion.div>
+
+    <button
+      onClick={() => setDeliverablesPanelOpen(true)}
+      className={cn(
+        "fixed right-0 top-1/2 z-40 -translate-y-1/2 rounded-l-2xl border border-r-0 border-primary/30 bg-primary text-primary-foreground shadow-2xl shadow-primary/20 transition-transform hover:-translate-x-1",
+        deliverablesPanelOpen && "translate-x-full"
+      )}
+      title="Ouvrir les livrables temps réel"
+    >
+      <span className="flex items-center gap-2 px-3 py-4 [writing-mode:vertical-rl]">
+        <PanelRightOpen className="h-4 w-4 rotate-90" />
+        <span className="text-xs font-bold uppercase tracking-widest">Livrables</span>
+      </span>
+    </button>
+
+    <AnimatePresence>
+      {deliverablesPanelOpen && (
+        <>
+          <motion.div
+            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px] xl:hidden"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setDeliverablesPanelOpen(false)}
+          />
+          <motion.aside
+            initial={{ x: 760, opacity: 0, scale: 0.96 }}
+            animate={{ x: 0, opacity: 1, scale: 1 }}
+            exit={{ x: 760, opacity: 0, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 260, damping: 30 }}
+            className="fixed bottom-0 right-0 top-0 z-50 flex w-full max-w-[760px] flex-col border-l border-border bg-background/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
+          >
+            <div className="flex items-center justify-between border-b border-border/60 p-5">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-primary">Temps réel</p>
+                <h2 className="mt-1 text-xl font-bold font-display">Livrables du projet</h2>
+              </div>
+              <Button variant="ghost" size="icon" onClick={() => setDeliverablesPanelOpen(false)}>
+                <X className="h-5 w-5" />
+              </Button>
+            </div>
+
+            <div className="flex gap-2 overflow-x-auto border-b border-border/60 p-4">
+              {[
+                { key: 'cdc', label: 'CDC', icon: BookOpen },
+                { key: 'mcd', label: 'MCD', icon: Database },
+                { key: 'architecture', label: 'Architecture', icon: Layers },
+                { key: 'roadmap', label: 'Roadmap', icon: Calendar },
+                { key: 'notes_synthese', label: 'Synthèse', icon: ClipboardList },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  onClick={() => setActiveDeliverable(item.key as any)}
+                  className={cn(
+                    'shrink-0 rounded-full border px-3 py-2 text-xs font-bold transition-colors inline-flex items-center gap-2',
+                    activeDeliverable === item.key ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-muted/20 text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  <item.icon className="h-3.5 w-3.5" /> {item.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+              {activeDeliverable === 'mcd' && (
+                <Card className="border-primary/20 bg-primary/5">
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <GitBranch className="h-4 w-4 text-primary" /> Graph Mermaid ERD
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <MermaidDiagram chart={mcdMermaid} />
+                  </CardContent>
+                </Card>
+              )}
+
+              <Card className="min-h-[420px] border-border/60">
+                <CardHeader className="border-b border-border/50">
+                  <CardTitle className="text-base capitalize">
+                    {activeDeliverable === 'mcd' ? 'MCD / Modèle de données' : activeDeliverable.replace('_', ' ')}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="p-5 prose prose-slate dark:prose-invert max-w-none text-sm">
+                  <div
+                    dangerouslySetInnerHTML={{
+                      __html: parseMarkdown(
+                        activeDeliverable === 'mcd'
+                          ? stripMermaidBlocks(String(activeLiveDeliverable || '*Livrable non généré.*')) || '*Description textuelle non générée.*'
+                          : String(activeLiveDeliverable || '*Livrable non généré.*')
+                      )
+                    }}
+                  />
+                </CardContent>
+              </Card>
+            </div>
+          </motion.aside>
+        </>
+      )}
+    </AnimatePresence>
+    </>
   );
 }
+
