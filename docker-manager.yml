@@ -14,7 +14,11 @@ services:
     public: true
     domain: api
     port: 8000
+    extra_networks:
+      - default
   frontend:
     public: true
     domain: frontend
     port: 3000
+    extra_networks:
+      - default
