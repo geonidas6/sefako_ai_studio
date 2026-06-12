@@ -1,5 +1,5 @@
 export interface WsEvent {
-  type: 'workflow_started' | 'user_message' | 'round_start' | 'round_complete' | 'agent_start' | 'agent_complete' | 'employee_message' | 'agent_error' | 'workflow_complete' | 'workflow_error' | 'workflow_paused' | 'error' | 'ping';
+  type: 'workflow_started' | 'user_message' | 'round_start' | 'round_complete' | 'agent_start' | 'agent_complete' | 'employee_message' | 'agent_error' | 'workflow_complete' | 'workflow_error' | 'workflow_paused' | 'implementation_status' | 'implementation_complete' | 'implementation_error' | 'error' | 'ping';
   timestamp?: string;
   sequence?: number;
   round?: number;
@@ -24,6 +24,8 @@ export interface WsEvent {
     roadmap?: string;
     notes_synthese?: string;
   };
+  pipeline?: any;
+  workspace?: any;
 }
 
 export function connectProjectWs(

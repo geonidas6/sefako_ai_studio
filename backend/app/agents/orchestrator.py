@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from typing import TypedDict, Optional, Any
 
@@ -125,6 +126,48 @@ def clamp_text(text: str, limit: int) -> str:
         return clean
     return f"{clean[:limit].rstrip()}\n\n[Contenu tronqué automatiquement pour maîtriser les tokens et éviter les erreurs API.]"
 
+def extract_mermaid_block(text: str) -> str:
+    match = re.search(r"```mermaid\s*([\s\S]*?)```", text or "", re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def count_mermaid_entities(text: str) -> int:
+    mermaid = extract_mermaid_block(text)
+    if not mermaid:
+        return 0
+    return len(re.findall(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*\{", mermaid, re.MULTILINE))
+
+
+def inject_mermaid_block(text: str, mermaid: str) -> str:
+    fenced = f"```mermaid\n{mermaid.strip()}\n```"
+    if re.search(r"```mermaid\s*[\s\S]*?```", text or "", re.IGNORECASE):
+        return re.sub(r"```mermaid\s*[\s\S]*?```", fenced, text, count=1, flags=re.IGNORECASE)
+    base = (text or "").strip()
+    return f"{base}\n\n{fenced}".strip()
+
+
+def preserve_deliverable_depth(deliverables: dict, r1: dict) -> dict:
+    enriched = dict(deliverables or {})
+
+    source_mcd = r1.get("engineering") or ""
+    final_mcd = enriched.get("mcd") or ""
+    source_entities = count_mermaid_entities(source_mcd)
+    final_entities = count_mermaid_entities(final_mcd)
+
+    if source_entities >= 5 and final_entities and final_entities < source_entities:
+        source_mermaid = extract_mermaid_block(source_mcd)
+        if source_mermaid:
+            enriched["mcd"] = inject_mermaid_block(
+                final_mcd,
+                source_mermaid,
+            ) + "\n\n> Le graphe MCD détaillé du round d'ingénierie a été conservé car il était plus complet que la première synthèse finale."
+    elif source_entities >= 5 and not final_entities:
+        source_mermaid = extract_mermaid_block(source_mcd)
+        if source_mermaid:
+            enriched["mcd"] = inject_mermaid_block(final_mcd or "## MCD\n", source_mermaid)
+
+    return enriched
+
 # ──────────────────────────────────────────────
 # Agent node functions
 # ──────────────────────────────────────────────
@@ -176,13 +219,20 @@ ANALYSES INITIALES SYNTHÉTISÉES (Round 1):
 CRITIQUES CROISÉES SYNTHÉTISÉES (Round 2):
 {critiques_text}
 
+RÈGLE ABSOLUE DE CONSOLIDATION :
+- La synthèse finale ne doit jamais être plus pauvre que les analyses déjà validées.
+- Tu dois conserver toutes les entités, relations, modules, contraintes, décisions et points structurants confirmés par les rounds précédents.
+- Si un élément du Round 1 reste valable et n'est pas invalidé par une critique, il doit rester visible dans le livrable final.
+- Le MCD final doit être au moins aussi riche que le MCD d'ingénierie validé auparavant.
+- N'abrège pas à l'excès : préfère une synthèse consolidée et complète à une version trop courte.
+
 Produis maintenant un JSON valide (sans markdown, juste le JSON brut) avec cette structure exacte:
 {{
-  "cdc": "Cahier des charges complet en Markdown",
-  "mcd": "Description du MCD en Markdown. Inclus obligatoirement un bloc fenced Mermaid commençant par ```mermaid puis erDiagram, avec les entités, attributs et relations principales.",
-  "architecture": "Architecture technique en Markdown",
-  "roadmap": "Roadmap détaillée en Markdown",
-  "notes_synthese": "Notes de synthèse et points d'attention"
+  "cdc": "Cahier des charges complet en Markdown, avec objectifs, périmètre, utilisateurs, fonctionnalités, contraintes, flux clés et critères d'acceptation.",
+  "mcd": "Description du MCD en Markdown. Inclus obligatoirement un bloc fenced Mermaid commençant par ```mermaid puis erDiagram, avec les entités, attributs et relations principales. Ne supprime aucune entité importante déjà identifiée si elle reste pertinente.",
+  "architecture": "Architecture technique en Markdown, avec composants backend/frontend, données, sécurité, intégrations et décisions techniques.",
+  "roadmap": "Roadmap détaillée en Markdown, avec phases, priorités, MVP, dépendances et jalons.",
+  "notes_synthese": "Notes de synthèse, arbitrages, risques, points ouverts et recommandations de suite."
 }}"""
 
 
@@ -494,6 +544,7 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
             except json.JSONDecodeError as e:
                 raise RuntimeError("L'orchestrateur IA n'a pas retourné un JSON valide pour les livrables.") from e
 
+            deliverables = preserve_deliverable_depth(deliverables, r1)
             ensure_not_paused()
             await persist_project_field(state["project_id"], "final_deliverables", deliverables)
             await emit("round_complete", round=final_round)
@@ -575,12 +626,22 @@ async def run_project_workflow(
                 "engineering": final_state.get("engineering_critique", ""),
                 "devops": final_state.get("devops_critique", ""),
             }
-            project.final_deliverables = final_state.get("final_deliverables", {})
+            from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, ensure_pipeline_metadata, get_workspace_settings
+
+            deliverables = dict(final_state.get("final_deliverables", {}) or {})
+            settings = await get_workspace_settings(db)
+            deliverables = ensure_pipeline_metadata(deliverables, settings)
+            project.final_deliverables = deliverables
             project.status = "completed"
             project.completed_at = datetime.now(timezone.utc)
             await db.commit()
+            await event_queue.put({
+                "type": "implementation_status",
+                "message": "Analyse terminée. Validation admin requise avant conception technique." if settings.require_technical_approval else "Analyse terminée. La conception technique peut démarrer.",
+                "pipeline": deliverables.get(IMPLEMENTATION_PIPELINE_KEY),
+            })
 
-        return final_state.get("final_deliverables", {})
+        return deliverables
 
     except WorkflowPaused as e:
         result = await db.execute(select(Project).where(Project.id == project_id))

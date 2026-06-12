@@ -1,18 +1,133 @@
+import io
 import uuid
+import zipfile
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, delete
 from pydantic import BaseModel
 
+from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, IMPLEMENTATION_WORKSPACE_KEY, ensure_pipeline_metadata, ensure_within_workspace, get_workspace_settings, initialize_project_workspace, set_pipeline_phase
+from app.core.security import get_current_admin
 from app.db.database import get_db
 from app.models.project import Project
 from app.models.workflow_event import WorkflowEvent
 from app.core.workflow_runner import get_project_events, is_workflow_active, publish_project_event, request_pause, start_project_workflow
+from app.core.implementation_runner import is_implementation_active, start_implementation_pipeline
 
 router = APIRouter()
 
+
+
+
+def _get_workspace_dir(project: Project) -> Path | None:
+    deliverables = dict(project.final_deliverables or {})
+    workspace = deliverables.get(IMPLEMENTATION_WORKSPACE_KEY)
+    if not isinstance(workspace, dict):
+        return None
+    project_dir = workspace.get("project_dir")
+    if not project_dir:
+        return None
+    try:
+        return Path(project_dir).resolve()
+    except Exception:
+        return None
+
+
+def _build_markdown_export(project: Project) -> str:
+    deliverables = dict(project.final_deliverables or {})
+    critiques = dict(project.critiques or {})
+    sections = [
+        f"# {project.title}",
+        '',
+        f"- Projet ID: `{project.id}`",
+        f"- Statut: `{project.status}`",
+        f"- Créé le: `{project.created_at.isoformat()}`",
+        f"- Terminé le: `{project.completed_at.isoformat()}`" if project.completed_at else '- Terminé le: `n/a`',
+        '',
+        '## Brief',
+        '',
+        project.input_text or '',
+        '',
+        '## Round 1 - Stratégie',
+        '',
+        project.strategy_r1 or '',
+        '',
+        '## Round 1 - UX',
+        '',
+        project.ux_r1 or '',
+        '',
+        '## Round 1 - Ingénierie',
+        '',
+        project.engineering_r1 or '',
+        '',
+        '## Round 1 - DevOps',
+        '',
+        project.devops_r1 or '',
+        '',
+        '## Round 2 - Critiques',
+        '',
+        '### Stratégie',
+        '',
+        critiques.get('strategy', ''),
+        '',
+        '### UX',
+        '',
+        critiques.get('ux', ''),
+        '',
+        '### Ingénierie',
+        '',
+        critiques.get('engineering', ''),
+        '',
+        '### DevOps',
+        '',
+        critiques.get('devops', ''),
+        '',
+        '## Round 3 - CDC',
+        '',
+        str(deliverables.get('cdc') or ''),
+        '',
+        '## Round 3 - MCD',
+        '',
+        str(deliverables.get('mcd') or ''),
+        '',
+        '## Round 3 - Architecture',
+        '',
+        str(deliverables.get('architecture') or ''),
+        '',
+        '## Round 3 - Roadmap',
+        '',
+        str(deliverables.get('roadmap') or ''),
+        '',
+        '## Round 3 - Synthèse',
+        '',
+        str(deliverables.get('notes_synthese') or ''),
+        '',
+    ]
+    pipeline = deliverables.get(IMPLEMENTATION_PIPELINE_KEY)
+    if isinstance(pipeline, dict):
+        sections.extend([
+            '## Pipeline applicatif',
+            '',
+            f"- Statut: `{pipeline.get('status')}`",
+            f"- Phase courante: `{pipeline.get('current_phase')}`",
+            f"- Dossier projet: `{pipeline.get('project_dir') or 'n/a'}`",
+            '',
+        ])
+    return '\n'.join(sections).strip() + '\n'
+
+
+def _workspace_tree(project_dir: Path) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for file_path in sorted(project_dir.rglob('*')):
+        if file_path.is_dir():
+            continue
+        resolved = ensure_within_workspace(project_dir, file_path)
+        rel = resolved.relative_to(project_dir).as_posix()
+        items.append({'path': rel, 'name': resolved.name})
+    return items
 
 class ProjectCreateIn(BaseModel):
     title: str
@@ -37,6 +152,19 @@ class ProjectOut(BaseModel):
     final_deliverables: Optional[dict]
     created_at: str
     completed_at: Optional[str]
+
+
+class TechnicalDesignStartIn(BaseModel):
+    approved: bool = False
+
+
+class ImplementationStartIn(BaseModel):
+    approved: bool = False
+
+
+class WorkspaceFileUpdateIn(BaseModel):
+    path: str
+    content: str
 
 
 def project_to_dict(p: Project) -> ProjectOut:
@@ -174,6 +302,233 @@ async def restart_project(project_id: str, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(project)
     return project_to_dict(project)
+
+
+@router.post("/{project_id}/technical-design/start", response_model=ProjectOut)
+async def start_technical_design(
+    project_id: str,
+    body: TechnicalDesignStartIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    if project.status != "completed":
+        raise HTTPException(status_code=400, detail="La conception technique n'est disponible qu'après une analyse terminée.")
+
+    settings = await get_workspace_settings(db)
+    if settings.require_technical_approval and not body.approved:
+        raise HTTPException(status_code=409, detail="Validation administrateur requise avant de lancer la phase conception technique.")
+
+    deliverables = ensure_pipeline_metadata(dict(project.final_deliverables or {}), settings)
+    workspace_info = initialize_project_workspace(
+        root_path=settings.root_path,
+        project_id=project.id,
+        project_title=project.title,
+        deliverables={**deliverables, "input_text": project.input_text},
+    )
+    deliverables[IMPLEMENTATION_WORKSPACE_KEY] = workspace_info
+    pipeline = dict(deliverables.get(IMPLEMENTATION_PIPELINE_KEY) or {})
+    pipeline = set_pipeline_phase(
+        pipeline,
+        "admin_approval",
+        "completed",
+        overall_status="ready",
+        project_dir=workspace_info["project_dir"],
+        generated_files=workspace_info.get("files") or [],
+        last_error=None,
+    )
+    pipeline = set_pipeline_phase(
+        pipeline,
+        "technical_design",
+        "completed",
+        overall_status="ready",
+        project_dir=workspace_info["project_dir"],
+        generated_files=workspace_info.get("files") or [],
+        last_error=None,
+    )
+    deliverables[IMPLEMENTATION_PIPELINE_KEY] = pipeline
+    project.final_deliverables = deliverables
+    await db.commit()
+    await db.refresh(project)
+
+    await publish_project_event(project_id, {
+        "type": "employee_message",
+        "agent": "orchestrator",
+        "department": "Orchestrateur",
+        "employee": {"name": "Sefako Orchestrateur", "role": "Chef de projet IA", "avatar": "SO"},
+        "message": f"Workspace de conception technique initialisé dans {workspace_info['project_dir']}. Les futures générations resteront confinées dans ce dossier.",
+        "phase": "technical_design",
+        "target": "workspace projet",
+    })
+    await publish_project_event(project_id, {
+        "type": "implementation_status",
+        "message": "Conception technique prête. L'admin peut maintenant lancer la phase applicative.",
+        "pipeline": pipeline,
+    })
+
+    return project_to_dict(project)
+
+
+@router.post("/{project_id}/implementation/start")
+async def start_project_implementation(
+    project_id: str,
+    body: ImplementationStartIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    if project.status != "completed":
+        raise HTTPException(status_code=400, detail="La phase applicative n'est disponible qu'après une analyse terminée.")
+    if is_implementation_active(project_id):
+        return {"started": False, "already_running": True}
+
+    settings = await get_workspace_settings(db)
+    deliverables = ensure_pipeline_metadata(dict(project.final_deliverables or {}), settings)
+    pipeline = dict(deliverables.get(IMPLEMENTATION_PIPELINE_KEY) or {})
+    if settings.require_technical_approval and pipeline.get("status") == "awaiting_admin_approval" and not body.approved:
+        raise HTTPException(status_code=409, detail="Validation administrateur requise avant de lancer la phase applicative.")
+    workspace = deliverables.get(IMPLEMENTATION_WORKSPACE_KEY)
+    if not isinstance(workspace, dict) or not workspace.get("project_dir"):
+        raise HTTPException(status_code=409, detail="Initialisez d'abord la phase conception technique.")
+
+    try:
+        return await start_implementation_pipeline(project_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{project_id}/exports/markdown")
+async def export_project_markdown(project_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    content = _build_markdown_export(project)
+    filename = f"aia-project-{project.id}.md"
+    return Response(
+        content=content,
+        media_type='text/markdown; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{project_id}/workspace/tree")
+async def get_project_workspace_tree(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+    return {'project_dir': str(project_dir), 'files': _workspace_tree(project_dir)}
+
+
+@router.get("/{project_id}/workspace/file")
+async def get_project_workspace_file(
+    project_id: str,
+    path: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+    target = ensure_within_workspace(project_dir, project_dir / path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Fichier introuvable")
+    content = target.read_text(errors='ignore')
+    if len(content) > 250000:
+        content = content[:250000] + "\n\n[Tronqué automatiquement]"
+    return {'path': target.relative_to(project_dir).as_posix(), 'content': content}
+
+
+@router.put("/{project_id}/workspace/file")
+async def update_project_workspace_file(
+    project_id: str,
+    body: WorkspaceFileUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+
+    relative_path = (body.path or '').strip()
+    if not relative_path:
+        raise HTTPException(status_code=400, detail="Chemin de fichier invalide")
+    target = ensure_within_workspace(project_dir, project_dir / relative_path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Fichier introuvable")
+    if len(body.content) > 1_000_000:
+        raise HTTPException(status_code=400, detail="Contenu trop volumineux")
+
+    target.write_text(body.content)
+    await publish_project_event(project_id, {
+        "type": "implementation_status",
+        "message": f"Fichier sauvegardé : {relative_path}",
+        "pipeline": dict((project.final_deliverables or {}).get(IMPLEMENTATION_PIPELINE_KEY) or {}),
+    })
+    await publish_project_event(project_id, {
+        "type": "employee_message",
+        "agent": "engineering",
+        "department": "Ingénierie",
+        "employee": {"name": "Elias", "role": "Architecte logiciel", "avatar": "AR"},
+        "message": f"J'ai mis à jour le fichier `{relative_path}` dans le workspace projet sans sortir du périmètre autorisé.",
+        "phase": "workspace_edit",
+        "target": "repo projet",
+        "round": 4,
+    })
+    return {"success": True, "path": relative_path}
+
+
+@router.get("/{project_id}/workspace/archive")
+async def download_project_workspace_archive(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_path in project_dir.rglob('*'):
+            if file_path.is_dir():
+                continue
+            resolved = ensure_within_workspace(project_dir, file_path)
+            zf.write(resolved, resolved.relative_to(project_dir).as_posix())
+    filename = f"workspace-{project.id}.zip"
+    return Response(
+        content=buffer.getvalue(),
+        media_type='application/zip',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectOut)

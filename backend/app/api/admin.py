@@ -27,6 +27,11 @@ from app.core.llm_router import (
     get_qwen_auth_method,
     qwen_cli_is_authenticated,
 )
+from app.core.project_workspace import (
+    DEFAULT_WORKSPACE_ROOT,
+    get_workspace_settings,
+    save_workspace_settings,
+)
 
 router = APIRouter()
 
@@ -99,14 +104,29 @@ class AgencyDepartmentsIn(BaseModel):
 
 class WorkflowSettingsIn(BaseModel):
     debate_rounds: int = 1
+    llm_timeout_seconds: int = 180
 
 
 class WorkflowSettingsOut(BaseModel):
     debate_rounds: int
     max_debate_rounds: int = 3
+    llm_timeout_seconds: int = 180
+    min_timeout_seconds: int = 30
+    max_timeout_seconds: int = 900
+
+
+class GenerationSettingsIn(BaseModel):
+    root_path: str = DEFAULT_WORKSPACE_ROOT
+    require_technical_approval: bool = True
+
+
+class GenerationSettingsOut(BaseModel):
+    root_path: str
+    require_technical_approval: bool
 
 
 WORKFLOW_DEBATE_ROUNDS_KEY = "workflow_debate_rounds"
+WORKFLOW_LLM_TIMEOUT_KEY = "workflow_llm_timeout_seconds"
 QWEN_CONFIG_DIR = Path(os.environ.get("QWEN_CONFIG_DIR") or Path.home() / ".qwen")
 QWEN_SETTINGS_FILE = QWEN_CONFIG_DIR / "settings.json"
 
@@ -119,6 +139,14 @@ def clamp_debate_rounds(value: int | str | None) -> int:
     return max(1, min(parsed, 3))
 
 
+def clamp_llm_timeout_seconds(value: int | str | None) -> int:
+    try:
+        parsed = int(value or 180)
+    except (TypeError, ValueError):
+        parsed = 180
+    return max(30, min(parsed, 900))
+
+
 # ──────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────
@@ -128,9 +156,14 @@ async def get_workflow_settings(
     db: AsyncSession = Depends(get_db),
     _: object = Depends(get_current_admin),
 ):
-    result = await db.execute(select(LLMConfig).where(LLMConfig.provider == WORKFLOW_DEBATE_ROUNDS_KEY))
-    cfg = result.scalar_one_or_none()
-    return WorkflowSettingsOut(debate_rounds=clamp_debate_rounds(cfg.value if cfg else None))
+    result = await db.execute(
+        select(LLMConfig).where(LLMConfig.provider.in_([WORKFLOW_DEBATE_ROUNDS_KEY, WORKFLOW_LLM_TIMEOUT_KEY]))
+    )
+    configs = {cfg.provider: cfg for cfg in result.scalars().all()}
+    return WorkflowSettingsOut(
+        debate_rounds=clamp_debate_rounds(configs.get(WORKFLOW_DEBATE_ROUNDS_KEY).value if configs.get(WORKFLOW_DEBATE_ROUNDS_KEY) else None),
+        llm_timeout_seconds=clamp_llm_timeout_seconds(configs.get(WORKFLOW_LLM_TIMEOUT_KEY).value if configs.get(WORKFLOW_LLM_TIMEOUT_KEY) else None),
+    )
 
 
 @router.put("/workflow-settings", response_model=WorkflowSettingsOut)
@@ -140,16 +173,61 @@ async def update_workflow_settings(
     _: object = Depends(get_current_admin),
 ):
     debate_rounds = clamp_debate_rounds(body.debate_rounds)
-    result = await db.execute(select(LLMConfig).where(LLMConfig.provider == WORKFLOW_DEBATE_ROUNDS_KEY))
-    cfg = result.scalar_one_or_none()
-    if cfg is None:
-        cfg = LLMConfig(provider=WORKFLOW_DEBATE_ROUNDS_KEY)
-        db.add(cfg)
-    cfg.value = str(debate_rounds)
-    cfg.updated_at = datetime.now(timezone.utc)
-    await db.commit()
-    return WorkflowSettingsOut(debate_rounds=debate_rounds)
+    llm_timeout_seconds = clamp_llm_timeout_seconds(body.llm_timeout_seconds)
 
+    result = await db.execute(
+        select(LLMConfig).where(LLMConfig.provider.in_([WORKFLOW_DEBATE_ROUNDS_KEY, WORKFLOW_LLM_TIMEOUT_KEY]))
+    )
+    configs = {cfg.provider: cfg for cfg in result.scalars().all()}
+
+    debate_cfg = configs.get(WORKFLOW_DEBATE_ROUNDS_KEY)
+    if debate_cfg is None:
+        debate_cfg = LLMConfig(provider=WORKFLOW_DEBATE_ROUNDS_KEY)
+        db.add(debate_cfg)
+    debate_cfg.value = str(debate_rounds)
+    debate_cfg.updated_at = datetime.now(timezone.utc)
+
+    timeout_cfg = configs.get(WORKFLOW_LLM_TIMEOUT_KEY)
+    if timeout_cfg is None:
+        timeout_cfg = LLMConfig(provider=WORKFLOW_LLM_TIMEOUT_KEY)
+        db.add(timeout_cfg)
+    timeout_cfg.value = str(llm_timeout_seconds)
+    timeout_cfg.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    return WorkflowSettingsOut(
+        debate_rounds=debate_rounds,
+        llm_timeout_seconds=llm_timeout_seconds,
+    )
+
+
+@router.get("/generation-settings", response_model=GenerationSettingsOut)
+async def get_generation_settings(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    settings = await get_workspace_settings(db)
+    return GenerationSettingsOut(
+        root_path=settings.root_path,
+        require_technical_approval=settings.require_technical_approval,
+    )
+
+
+@router.put("/generation-settings", response_model=GenerationSettingsOut)
+async def update_generation_settings(
+    body: GenerationSettingsIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    settings = await save_workspace_settings(
+        db,
+        root_path=body.root_path,
+        require_technical_approval=body.require_technical_approval,
+    )
+    return GenerationSettingsOut(
+        root_path=settings.root_path,
+        require_technical_approval=settings.require_technical_approval,
+    )
 
 
 @router.get("/departments")

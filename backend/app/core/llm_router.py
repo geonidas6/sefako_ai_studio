@@ -286,6 +286,17 @@ class LLMRouter:
                 pass
         return get_default_requests_per_minute(provider)
 
+    async def _get_llm_timeout_seconds(self) -> int:
+        configs = await self._load_configs()
+        cfg = configs.get("workflow_llm_timeout_seconds")
+        if cfg and cfg.value:
+            try:
+                timeout = int(cfg.value)
+                return max(30, min(timeout, 900))
+            except ValueError:
+                pass
+        return 180
+
     async def _run_with_rate_limit(self, provider: str, rpm: int, call):
         lock = _PROVIDER_RATE_LOCKS.setdefault(provider, asyncio.Lock())
         interval = 60 / max(1, rpm)
@@ -401,6 +412,7 @@ class LLMRouter:
                 )
 
         rpm = await self._get_requests_per_minute(provider)
+        timeout_seconds = await self._get_llm_timeout_seconds()
 
         try:
             return await asyncio.wait_for(
@@ -409,7 +421,7 @@ class LLMRouter:
                     rpm,
                     lambda: self._call_provider(provider, model, api_key, prompt, system_prompt),
                 ),
-                timeout=180,
+                timeout=timeout_seconds,
             )
         except Exception as e:
             provider_name = PROVIDERS.get(provider, {}).get("name", provider)
@@ -430,10 +442,11 @@ class LLMRouter:
             env={**os.environ, "FORCE_COLOR": "0"},
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
+            timeout_seconds = await self._get_llm_timeout_seconds()
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
         except asyncio.TimeoutError as exc:
             process.kill()
-            raise RuntimeError("Qwen CLI a dépassé le timeout de 180 secondes.") from exc
+            raise RuntimeError(f"Qwen CLI a dépassé le timeout de {timeout_seconds} secondes.") from exc
 
         if process.returncode != 0:
             error = (stderr or stdout).decode(errors="ignore").strip()

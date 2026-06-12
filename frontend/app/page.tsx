@@ -32,6 +32,11 @@ export default function LandingPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  useEffect(() => {
+    setIsLoggedIn(Boolean(localStorage.getItem('token')));
+  }, []);
 
   useEffect(() => {
     async function loadProjects() {
@@ -175,11 +180,13 @@ export default function LandingPage() {
             </div>
             <h2 className="text-2xl font-bold font-display tracking-tight">Projets Récents</h2>
           </div>
-          <Button variant="ghost" size="sm" asChild>
-            <Link href="/projects" className="flex items-center gap-1.5">
-              Voir tous les projets <ChevronRight className="h-4 w-4" />
-            </Link>
-          </Button>
+          {isLoggedIn && (
+            <Button variant="ghost" size="sm" asChild>
+              <Link href="/projects" className="flex items-center gap-1.5">
+                Voir tous les projets <ChevronRight className="h-4 w-4" />
+              </Link>
+            </Button>
+          )}
         </div>
 
         {loading ? (
@@ -203,7 +210,7 @@ export default function LandingPage() {
                 <p className="text-sm text-muted-foreground">Commencez par créer votre premier projet dans le studio.</p>
               </div>
               <Button asChild>
-                <Link href="/studio">Accéder au Studio</Link>
+                <Link href={isLoggedIn ? '/studio' : '/admin/login'}>{isLoggedIn ? 'Accéder au Studio' : 'Connexion admin'}</Link>
               </Button>
             </div>
           </Card>
@@ -276,8 +283,8 @@ export default function LandingPage() {
             </p>
           </div>
           <div className="flex gap-10 text-sm font-medium">
-            <Link href="/studio" className="hover:text-primary transition-colors">Studio</Link>
-            <Link href="/projects" className="hover:text-primary transition-colors">Projets</Link>
+            {isLoggedIn && <Link href="/studio" className="hover:text-primary transition-colors">Studio</Link>}
+            {isLoggedIn && <Link href="/projects" className="hover:text-primary transition-colors">Projets</Link>}
             <Link href="/admin" className="hover:text-primary transition-colors">Administration</Link>
             <a href="#" className="hover:text-primary transition-colors">Documentation</a>
           </div>

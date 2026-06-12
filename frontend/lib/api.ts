@@ -11,6 +11,27 @@ function getHeaders() {
   return headers;
 }
 
+export async function downloadFile(path: string, filename?: string) {
+  const response = await fetch(`${API_BASE}${path}`, { headers: { ...getHeaders() } });
+  if (!response.ok) {
+    let errorMsg = 'Une erreur est survenue';
+    try {
+      const data = await response.json();
+      errorMsg = data.detail || errorMsg;
+    } catch {}
+    throw new Error(errorMsg);
+  }
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename || '';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}
+
 export async function request(path: string, options: RequestInit = {}) {
   const url = `${API_BASE}${path}`;
   const response = await fetch(url, {
@@ -129,6 +150,36 @@ export const api = {
         method: 'POST',
       });
     },
+    async startTechnicalDesign(id: string, approved = false) {
+      return request(`/projects/${id}/technical-design/start`, {
+        method: 'POST',
+        body: JSON.stringify({ approved }),
+      });
+    },
+    async startImplementation(id: string, approved = false) {
+      return request(`/projects/${id}/implementation/start`, {
+        method: 'POST',
+        body: JSON.stringify({ approved }),
+      });
+    },
+    async getWorkspaceTree(id: string) {
+      return request(`/projects/${id}/workspace/tree`);
+    },
+    async getWorkspaceFile(id: string, filePath: string) {
+      return request(`/projects/${id}/workspace/file?path=${encodeURIComponent(filePath)}`);
+    },
+    async saveWorkspaceFile(id: string, filePath: string, content: string) {
+      return request(`/projects/${id}/workspace/file`, {
+        method: 'PUT',
+        body: JSON.stringify({ path: filePath, content }),
+      });
+    },
+    async downloadWorkspaceArchive(id: string) {
+      return downloadFile(`/projects/${id}/workspace/archive`, `workspace-${id}.zip`);
+    },
+    async downloadMarkdownExport(id: string) {
+      return downloadFile(`/projects/${id}/exports/markdown`, `aia-project-${id}.md`);
+    },
     async delete(id: string) {
       return request(`/projects/${id}`, {
         method: 'DELETE',
@@ -152,8 +203,17 @@ export const api = {
     async getWorkflowSettings() {
       return request('/admin/workflow-settings');
     },
-    async updateWorkflowSettings(data: { debate_rounds: number }) {
+    async updateWorkflowSettings(data: { debate_rounds: number; llm_timeout_seconds: number }) {
       return request('/admin/workflow-settings', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
+    async getGenerationSettings() {
+      return request('/admin/generation-settings');
+    },
+    async updateGenerationSettings(data: { root_path: string; require_technical_approval: boolean }) {
+      return request('/admin/generation-settings', {
         method: 'PUT',
         body: JSON.stringify(data),
       });

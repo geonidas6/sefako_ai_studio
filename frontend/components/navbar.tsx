@@ -2,16 +2,24 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { FolderKanban, PenTool, Settings, Home } from 'lucide-react';
 
 export function Navbar() {
   const pathname = usePathname();
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  useEffect(() => {
+    setIsLoggedIn(Boolean(localStorage.getItem('token')));
+  }, []);
 
   const navItems = [
     { label: 'Accueil', href: '/', icon: Home },
-    { label: 'Studio', href: '/studio', icon: PenTool },
-    { label: 'Projets', href: '/projects', icon: FolderKanban },
+    ...(isLoggedIn ? [
+      { label: 'Studio', href: '/studio', icon: PenTool },
+      { label: 'Projets', href: '/projects', icon: FolderKanban },
+    ] : []),
     { label: 'Administration', href: '/admin', icon: Settings },
   ];
 
@@ -46,10 +54,10 @@ export function Navbar() {
             </Link>
           ))}
           <Link
-            href="/studio"
+            href={isLoggedIn ? '/studio' : '/admin/login'}
             className="hidden sm:inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
           >
-            Lancer un projet
+            {isLoggedIn ? 'Lancer un projet' : 'Connexion admin'}
           </Link>
         </nav>
       </div>

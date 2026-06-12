@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.db.database import create_tables
 from app.core.security import create_initial_admin
+from app.core.workflow_runner import recover_interrupted_workflows
+from app.core.implementation_runner import recover_interrupted_implementation_runs
 from app.api import auth, admin, projects, ws
 
 
@@ -12,6 +14,8 @@ from app.api import auth, admin, projects, ws
 async def lifespan(app: FastAPI):
     await create_tables()
     await create_initial_admin()
+    await recover_interrupted_workflows()
+    await recover_interrupted_implementation_runs()
     yield
 
 

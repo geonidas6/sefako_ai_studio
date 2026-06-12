@@ -87,6 +87,14 @@ interface DepartmentConfig {
 interface WorkflowSettings {
   debate_rounds: number;
   max_debate_rounds: number;
+  llm_timeout_seconds: number;
+  min_timeout_seconds: number;
+  max_timeout_seconds: number;
+}
+
+interface GenerationSettings {
+  root_path: string;
+  require_technical_approval: boolean;
 }
 
 interface QwenAuthStatus {
@@ -115,8 +123,10 @@ export default function AdminDashboard() {
   const [departments, setDepartments] = useState<DepartmentConfig[]>([]);
   const [savingDepartments, setSavingDepartments] = useState(false);
   const [costs, setCosts] = useState<CostSummary[]>([]);
-  const [workflowSettings, setWorkflowSettings] = useState<WorkflowSettings>({ debate_rounds: 1, max_debate_rounds: 3 });
+  const [workflowSettings, setWorkflowSettings] = useState<WorkflowSettings>({ debate_rounds: 1, max_debate_rounds: 3, llm_timeout_seconds: 180, min_timeout_seconds: 30, max_timeout_seconds: 900 });
   const [savingWorkflowSettings, setSavingWorkflowSettings] = useState(false);
+  const [generationSettings, setGenerationSettings] = useState<GenerationSettings>({ root_path: '/opt', require_technical_approval: true });
+  const [savingGenerationSettings, setSavingGenerationSettings] = useState(false);
   const [qwenAuth, setQwenAuth] = useState<QwenAuthStatus>({ authenticated: false, method: 'none' });
   const [startingQwenAuth, setStartingQwenAuth] = useState(false);
   const [savingQwenCliKey, setSavingQwenCliKey] = useState(false);
@@ -139,13 +149,14 @@ export default function AdminDashboard() {
 
     async function loadAdminData() {
       try {
-        const [projectsData, configsData, assignmentsData, departmentsData, costsData, workflowSettingsData, qwenAuthData] = await Promise.all([
+        const [projectsData, configsData, assignmentsData, departmentsData, costsData, workflowSettingsData, generationSettingsData, qwenAuthData] = await Promise.all([
           api.projects.list(),
           api.admin.getConfigs(),
           api.admin.getAssignments(),
           api.admin.getDepartments(),
           api.admin.getCosts(),
           api.admin.getWorkflowSettings(),
+          api.admin.getGenerationSettings(),
           api.admin.getQwenAuthStatus(),
         ]);
         setProjects(projectsData);
@@ -154,6 +165,7 @@ export default function AdminDashboard() {
         setDepartments(departmentsData);
         setCosts(costsData);
         setWorkflowSettings(workflowSettingsData);
+        setGenerationSettings(generationSettingsData);
         setQwenAuth(qwenAuthData);
       } catch (err: any) {
         setError(err.message || 'Impossible de charger les données.');
@@ -410,6 +422,7 @@ export default function AdminDashboard() {
     try {
       const response = await api.admin.updateWorkflowSettings({
         debate_rounds: workflowSettings.debate_rounds,
+        llm_timeout_seconds: workflowSettings.llm_timeout_seconds,
       });
       setWorkflowSettings(response);
       setSuccessMsg('Paramètres du workflow enregistrés.');
@@ -418,6 +431,22 @@ export default function AdminDashboard() {
       setError(err.message || 'Erreur lors de la sauvegarde du workflow.');
     } finally {
       setSavingWorkflowSettings(false);
+    }
+  };
+
+  const handleSaveGenerationSettings = async () => {
+    setError('');
+    setSuccessMsg('');
+    setSavingGenerationSettings(true);
+    try {
+      const response = await api.admin.updateGenerationSettings(generationSettings);
+      setGenerationSettings(response);
+      setSuccessMsg('Paramètres de génération enregistrés.');
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors de la sauvegarde des paramètres de génération.');
+    } finally {
+      setSavingGenerationSettings(false);
     }
   };
 
@@ -666,13 +695,60 @@ export default function AdminDashboard() {
       <Card className="border-primary/20 bg-primary/5">
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
+            <FolderKanban className="h-5 w-5 text-primary" />
+            Génération applicative
+          </CardTitle>
+          <CardDescription>Prépare la future phase de conception technique dans un workspace strictement confiné au dossier du projet.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_240px] gap-4">
+            <div className="space-y-2">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Dossier racine de génération</p>
+              <Input
+                value={generationSettings.root_path}
+                onChange={(event) => setGenerationSettings({ ...generationSettings, root_path: event.target.value })}
+                placeholder="/opt"
+                className="h-11 font-mono"
+              />
+              <p className="text-xs text-muted-foreground">Le backend forcera la génération dans <code>/opt</code> ou un sous-dossier de <code>/opt</code>. Aucun accès à docker_manager, Traefik ou aux autres projets ne sera autorisé.</p>
+            </div>
+            <div className="rounded-xl border border-border/60 bg-background/50 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Validation admin</p>
+              <label className="mt-3 flex items-start gap-3 text-sm">
+                <input
+                  type="checkbox"
+                  checked={generationSettings.require_technical_approval}
+                  onChange={(event) => setGenerationSettings({ ...generationSettings, require_technical_approval: event.target.checked })}
+                  className="mt-1 h-4 w-4 rounded border-border bg-background"
+                />
+                <span className="text-muted-foreground">Demander à l'admin s'il faut continuer lorsqu'on arrive à la phase conception technique.</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-border/60 bg-background/40 p-4 text-xs text-muted-foreground leading-relaxed">
+            Nommage prévu : <code>{`{slug}_{project_id}`}</code>. Exemple : <code>/opt/todolist_0185d095-8373-4f4d-bfda-ef4fffa03239</code>. Les manifestes Docker, <code>.env.example</code> et les YAML Traefik seront générés uniquement dans ce dossier projet.
+          </div>
+
+          <div className="flex justify-end">
+            <Button onClick={handleSaveGenerationSettings} disabled={savingGenerationSettings} className="h-10">
+              {savingGenerationSettings ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              Enregistrer la génération
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-primary/20 bg-primary/5">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
             <Settings className="h-5 w-5 text-primary" />
             Workflow d'analyse
           </CardTitle>
           <CardDescription>Structure complète du cycle de travail des employés IA.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
             <div className="rounded-xl border border-border/60 bg-background/60 p-4">
               <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Rounds d'analyse initiale</p>
               <p className="mt-3 text-3xl font-bold font-display">1</p>
@@ -699,6 +775,26 @@ export default function AdminDashboard() {
               <p className="mt-2 text-xs text-muted-foreground">Configurable : les équipes se challengent avant l'arbitrage.</p>
             </div>
 
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-amber-500">Timeout LLM</p>
+              <div className="mt-3 flex items-center gap-3">
+                <Input
+                  type="number"
+                  min={workflowSettings.min_timeout_seconds || 30}
+                  max={workflowSettings.max_timeout_seconds || 900}
+                  value={workflowSettings.llm_timeout_seconds}
+                  onChange={(event) => {
+                    const parsed = Number.parseInt(event.target.value, 10);
+                    const safe = Number.isFinite(parsed) ? Math.max(workflowSettings.min_timeout_seconds || 30, Math.min(parsed, workflowSettings.max_timeout_seconds || 900)) : 180;
+                    setWorkflowSettings({ ...workflowSettings, llm_timeout_seconds: safe });
+                  }}
+                  className="h-11 max-w-32 font-mono text-lg font-bold"
+                />
+                <span className="text-xs text-muted-foreground">sec</span>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">Durée maximale d'un appel IA avant coupure automatique et erreur récupérable.</p>
+            </div>
+
             <div className="rounded-xl border border-border/60 bg-background/60 p-4">
               <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Synthèse finale</p>
               <p className="mt-3 text-3xl font-bold font-display">1</p>
@@ -708,7 +804,7 @@ export default function AdminDashboard() {
 
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 rounded-xl border border-border/60 bg-background/40 p-4">
             <p className="text-xs text-muted-foreground leading-relaxed max-w-3xl">
-              Recommandation actuelle : 1 round de débat pour limiter les coûts et éviter les boucles. Les checkpoints permettent de reprendre sans tout régénérer.
+              Recommandation actuelle : 1 round de débat pour limiter les coûts et éviter les boucles, avec un timeout LLM entre 120 et 240 secondes selon la qualité du provider. Les checkpoints permettent de reprendre sans tout régénérer.
             </p>
             <Button onClick={handleSaveWorkflowSettings} disabled={savingWorkflowSettings} className="h-10 shrink-0">
               {savingWorkflowSettings ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}

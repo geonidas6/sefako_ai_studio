@@ -118,6 +118,38 @@ async def request_pause(project_id: str) -> bool:
     return False
 
 
+async def recover_interrupted_workflows() -> int:
+    """Convert stale running projects to paused after a backend restart."""
+    message = (
+        "Analyse interrompue : le backend a redémarré ou la tâche a été coupée pendant l'exécution. "
+        "Le projet a été mis en pause automatiquement. Vous pouvez reprendre depuis le dernier checkpoint."
+    )
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Project).where(Project.status == "running"))
+        projects = result.scalars().all()
+        if not projects:
+            return 0
+
+        recovered_ids: list[str] = []
+        for project in projects:
+            project.status = "paused"
+            project.completed_at = None
+            project.final_deliverables = {"error": message, "reason": "interrupted"}
+            recovered_ids.append(project.id)
+
+        await db.commit()
+
+    for project_id in recovered_ids:
+        await publish_project_event(project_id, {
+            "type": "workflow_paused",
+            "message": message,
+            "reason": "interrupted",
+        })
+
+    return len(recovered_ids)
+
+
 async def start_project_workflow(project_id: str, reset: bool = False) -> dict[str, Any]:
     async with _project_lock(project_id):
         active = ACTIVE_WORKFLOW_TASKS.get(project_id)
