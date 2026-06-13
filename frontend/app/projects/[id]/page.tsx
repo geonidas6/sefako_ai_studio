@@ -28,7 +28,11 @@ import {
   X,
   GitBranch,
   Download,
-  FolderTree
+  FolderTree,
+  FilePlus2,
+  FolderPlus,
+  Folder,
+  FileCode2
 } from 'lucide-react';
 import { api } from '../../../lib/api';
 import { connectProjectWs, WsEvent } from '../../../lib/websocket';
@@ -77,16 +81,20 @@ function extractMermaidDiagram(content: string = ''): string {
   const fenced = content.match(/```mermaid\s*([\s\S]*?)```/i);
   if (fenced?.[1]) return fenced[1].trim();
 
-  const start = content.indexOf('erDiagram');
-  if (start === -1) return '';
-  const lines = content.slice(start).split('\n');
-  const collected: string[] = [];
-  for (const line of lines) {
-    if (collected.length > 0 && line.trim() === '') break;
-    if (collected.length > 0 && /^#{1,6}\s/.test(line)) break;
-    collected.push(line);
+  const trimmed = content.trim();
+  if (trimmed.startsWith('erDiagram')) {
+    return trimmed;
   }
-  return collected.join('\n').trim();
+  return '';
+}
+
+function looksUsableMermaidErDiagram(chart: string = ''): boolean {
+  const normalized = chart.trim();
+  if (!normalized.startsWith('erDiagram')) return false;
+  const hasRelation = /(\|\|--o\{|\|\|--\|\{|o\{--\|\||o\{--o\{|\}\|--\|\{|\}\|--o\{)/.test(normalized);
+  const openBraces = (normalized.match(/\{/g) || []).length;
+  const closeBraces = (normalized.match(/\}/g) || []).length;
+  return hasRelation && openBraces > 0 && openBraces === closeBraces;
 }
 
 function buildFallbackErDiagram(content: string = '', projectText: string = ''): string {
@@ -308,7 +316,11 @@ function MermaidDiagram({ chart }: { chart: string }) {
 
         window.mermaid?.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
         const result = await window.mermaid?.render(`${chartIdRef.current}-${Date.now()}`, chart);
-        if (!cancelled && result?.svg) setSvg(result.svg);
+        const renderedSvg = result?.svg || '';
+        if (/Syntax error in text|mermaid version/i.test(renderedSvg)) {
+          throw new Error('Le diagramme Mermaid généré est invalide. Le fallback textuel reste disponible ci-dessous.');
+        }
+        if (!cancelled && renderedSvg) setSvg(renderedSvg);
       } catch (err: any) {
         if (!cancelled) setError(err.message || 'Diagramme Mermaid invalide');
       }
@@ -357,13 +369,16 @@ export default function ProjectDashboard() {
   const [generationSettings, setGenerationSettings] = useState<GenerationSettings>({ root_path: '/opt', require_technical_approval: true });
   const [startingTechnicalDesign, setStartingTechnicalDesign] = useState(false);
   const [startingImplementation, setStartingImplementation] = useState(false);
-  const [workspaceFiles, setWorkspaceFiles] = useState<{ path: string; name: string }[]>([]);
+  const [workspaceFiles, setWorkspaceFiles] = useState<{ path: string; name: string; is_dir?: boolean; kind?: string }[]>([]);
   const [selectedWorkspaceFile, setSelectedWorkspaceFile] = useState('');
   const [workspaceFileContent, setWorkspaceFileContent] = useState('');
   const [workspaceSavedContent, setWorkspaceSavedContent] = useState('');
   const [loadingWorkspaceFiles, setLoadingWorkspaceFiles] = useState(false);
   const [loadingWorkspaceFile, setLoadingWorkspaceFile] = useState(false);
   const [savingWorkspaceFile, setSavingWorkspaceFile] = useState(false);
+  const [creatingWorkspaceEntry, setCreatingWorkspaceEntry] = useState(false);
+  const [newWorkspacePath, setNewWorkspacePath] = useState('');
+  const [workspaceMovePath, setWorkspaceMovePath] = useState('');
 
   const [logs, setLogs] = useState<{ text: string; type?: 'info' | 'success' | 'error' | 'system' }[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -383,6 +398,8 @@ export default function ProjectDashboard() {
   const [agentStatuses, setAgentStatuses] = useState<Record<string, string>>({});
   const [wsStatus, setWsStatus] = useState<'connecting' | 'running' | 'idle' | 'error' | 'paused'>('idle');
   const [currentRound, setCurrentRound] = useState<number | null>(null);
+
+  const selectedWorkspaceEntry = workspaceFiles.find((entry) => entry.path === selectedWorkspaceFile) || null;
 
   const wsCleanupRef = useRef<(() => void) | null>(null);
   const seenEventSequencesRef = useRef<Set<number>>(new Set());
@@ -418,6 +435,12 @@ export default function ProjectDashboard() {
 
   useEffect(() => {
     if (!isAdminSession || !selectedWorkspaceFile) return;
+    if (selectedWorkspaceEntry?.is_dir) {
+      setWorkspaceFileContent('');
+      setWorkspaceSavedContent('');
+      setLoadingWorkspaceFile(false);
+      return;
+    }
     let cancelled = false;
     setLoadingWorkspaceFile(true);
     api.projects.getWorkspaceFile(projectId, selectedWorkspaceFile)
@@ -427,7 +450,7 @@ export default function ProjectDashboard() {
       .catch(() => { if (!cancelled) setWorkspaceFileContent(''); })
       .finally(() => { if (!cancelled) setLoadingWorkspaceFile(false); });
     return () => { cancelled = true; };
-  }, [isAdminSession, selectedWorkspaceFile, projectId]);
+  }, [isAdminSession, selectedWorkspaceFile, selectedWorkspaceEntry?.is_dir, projectId]);
 
   useEffect(() => {
     async function loadProject() {
@@ -597,6 +620,68 @@ export default function ProjectDashboard() {
       setLogs((prev) => [...prev, { text: err.message || 'Impossible de sauvegarder ce fichier.', type: 'error' }]);
     } finally {
       setSavingWorkspaceFile(false);
+    }
+  };
+
+  const handleCreateWorkspaceEntry = async (isDirectory: boolean) => {
+    const filePath = newWorkspacePath.trim();
+    if (!filePath) return;
+    setCreatingWorkspaceEntry(true);
+    try {
+      await api.projects.createWorkspaceEntry(projectId, filePath, isDirectory, '');
+      const data = await api.projects.getWorkspaceTree(projectId);
+      setWorkspaceFiles(data.files || []);
+      setNewWorkspacePath('');
+      setSelectedWorkspaceFile(filePath);
+      setWorkspaceMovePath(filePath);
+      setLogs((prev) => [...prev, { text: `${isDirectory ? 'Dossier' : 'Fichier'} créé: ${filePath}`, type: 'success' }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || `Impossible de créer le ${isDirectory ? 'dossier' : 'fichier'}.`, type: 'error' }]);
+    } finally {
+      setCreatingWorkspaceEntry(false);
+    }
+  };
+
+  const handleDeleteWorkspaceEntry = async () => {
+    if (!selectedWorkspaceFile) return;
+    const confirmed = window.confirm(`Supprimer ${selectedWorkspaceFile} du workspace projet ?`);
+    if (!confirmed) return;
+    setCreatingWorkspaceEntry(true);
+    try {
+      await api.projects.deleteWorkspaceEntry(projectId, selectedWorkspaceFile);
+      const deletedPath = selectedWorkspaceFile;
+      const data = await api.projects.getWorkspaceTree(projectId);
+      const files = data.files || [];
+      setWorkspaceFiles(files);
+      setSelectedWorkspaceFile(files[0]?.path || '');
+      if (!files.length) {
+        setWorkspaceFileContent('');
+        setWorkspaceSavedContent('');
+      }
+      setLogs((prev) => [...prev, { text: `Entrée supprimée: ${deletedPath}`, type: 'success' }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible de supprimer cette entrée.', type: 'error' }]);
+    } finally {
+      setCreatingWorkspaceEntry(false);
+    }
+  };
+
+  const handleMoveWorkspaceEntry = async () => {
+    const oldPath = selectedWorkspaceFile.trim();
+    const newPath = workspaceMovePath.trim();
+    if (!oldPath || !newPath || oldPath === newPath) return;
+    setCreatingWorkspaceEntry(true);
+    try {
+      await api.projects.moveWorkspaceEntry(projectId, oldPath, newPath);
+      const data = await api.projects.getWorkspaceTree(projectId);
+      setWorkspaceFiles(data.files || []);
+      setSelectedWorkspaceFile(newPath);
+      setWorkspaceMovePath(newPath);
+      setLogs((prev) => [...prev, { text: `Entrée déplacée: ${oldPath} -> ${newPath}`, type: 'success' }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible de renommer cette entrée.', type: 'error' }]);
+    } finally {
+      setCreatingWorkspaceEntry(false);
     }
   };
 
@@ -781,7 +866,9 @@ export default function ProjectDashboard() {
   const activeLiveDeliverable = liveDeliverableCards.find((item) => item.key === activeDeliverable)?.value || deliverables[activeDeliverable] || '';
   const selectedDeliverableContent = String(selectedRoundDeliverables?.[activeDeliverable] || '*Livrable non généré pour cette ronde.*');
   const mcdSource = String(selectedRoundDeliverables?.mcd || deliverables.mcd || project.engineering_r1 || '');
-  const mcdMermaid = extractMermaidDiagram(mcdSource) || buildFallbackErDiagram(mcdSource, project.input_text || '');
+  const extractedMcdMermaid = extractMermaidDiagram(mcdSource);
+  const fallbackMcdMermaid = buildFallbackErDiagram(mcdSource, project.input_text || '');
+  const mcdMermaid = looksUsableMermaidErDiagram(extractedMcdMermaid) ? extractedMcdMermaid : fallbackMcdMermaid;
   const hasRound1 = Boolean(project.strategy_r1 || project.ux_r1 || project.engineering_r1 || project.devops_r1);
   const round1Complete = Boolean(project.strategy_r1 && project.ux_r1 && project.engineering_r1 && project.devops_r1);
   const critiques = project.critiques || {};
@@ -1124,9 +1211,16 @@ export default function ProjectDashboard() {
                     <Download className="h-3.5 w-3.5" /> Export Markdown
                   </Button>
                   {isAdminSession && (
-                    <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadWorkspace}>
-                      <FolderTree className="h-3.5 w-3.5" /> Télécharger le repo ZIP
-                    </Button>
+                    <>
+                      <Button asChild type="button" variant="outline" size="sm" className="gap-2">
+                        <Link href={`/projects/${projectId}/workspace`}>
+                          <FolderTree className="h-3.5 w-3.5" /> Ouvrir l'IDE applicatif
+                        </Link>
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadWorkspace}>
+                        <FolderTree className="h-3.5 w-3.5" /> Télécharger le repo ZIP
+                      </Button>
+                    </>
                   )}
                 </div>
               </CardContent>
@@ -1164,11 +1258,47 @@ export default function ProjectDashboard() {
                   <FolderTree className="h-4 w-4 text-primary" /> Fichiers du workspace
                 </CardTitle>
                 <CardDescription>
-                  Lecture seule pour vérifier instantanément le repo généré dans le dossier projet.
+                  Crée des fichiers/dossiers et modifie le repo généré, toujours dans le périmètre strict du dossier projet.
                 </CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
-                <div className="max-h-[360px] overflow-y-auto rounded-xl border border-border/60 bg-muted/20 p-2">
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-border/60 bg-muted/20 p-3">
+                    <div className="mb-2 text-[11px] uppercase tracking-[0.24em] text-muted-foreground">Nouveau dans le workspace</div>
+                    <div className="flex flex-col gap-2">
+                      <input
+                        value={newWorkspacePath}
+                        onChange={(event) => setNewWorkspacePath(event.target.value)}
+                        placeholder="src/app/page.tsx ou docs"
+                        className="h-10 rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="flex-1 gap-2"
+                          disabled={creatingWorkspaceEntry || !newWorkspacePath.trim()}
+                          onClick={() => handleCreateWorkspaceEntry(false)}
+                        >
+                          {creatingWorkspaceEntry ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FilePlus2 className="h-3.5 w-3.5" />}
+                          Fichier
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="flex-1 gap-2"
+                          disabled={creatingWorkspaceEntry || !newWorkspacePath.trim()}
+                          onClick={() => handleCreateWorkspaceEntry(true)}
+                        >
+                          <FolderPlus className="h-3.5 w-3.5" />
+                          Dossier
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="max-h-[360px] overflow-y-auto rounded-xl border border-border/60 bg-muted/20 p-2">
                   {loadingWorkspaceFiles ? (
                     <div className="p-3 text-xs text-muted-foreground">Chargement des fichiers...</div>
                   ) : workspaceFiles.length === 0 ? (
@@ -1177,29 +1307,43 @@ export default function ProjectDashboard() {
                     <button
                       key={file.path}
                       type="button"
-                      onClick={() => setSelectedWorkspaceFile(file.path)}
+                      onClick={() => { setSelectedWorkspaceFile(file.path); setWorkspaceMovePath(file.path); }}
                       className={cn(
                         'w-full rounded-lg px-3 py-2 text-left text-xs transition-colors',
                         selectedWorkspaceFile === file.path ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'
                       )}
                     >
-                      {file.path}
+                      <div className="flex items-center gap-2">
+                        {file.is_dir ? <Folder className="h-3.5 w-3.5" /> : <FileCode2 className="h-3.5 w-3.5" />}
+                        <span className="truncate">{file.path}</span>
+                      </div>
                     </button>
                   ))}
+                  </div>
                 </div>
                 <div className="min-h-[360px] rounded-xl border border-border/60 bg-black p-4">
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <div className="text-xs font-mono text-primary">{selectedWorkspaceFile || 'Sélectionne un fichier'}</div>
+                    <div className="text-xs font-mono text-primary">{selectedWorkspaceFile || 'Sélectionne une entrée'}</div>
                     <div className="flex items-center gap-2">
-                      {workspaceFileContent !== workspaceSavedContent && (
+                      {!selectedWorkspaceEntry?.is_dir && workspaceFileContent !== workspaceSavedContent && (
                         <span className="text-[10px] uppercase tracking-widest text-amber-400">Modifié</span>
                       )}
                       <Button
                         type="button"
                         size="sm"
                         variant="outline"
+                        className="gap-2 text-destructive hover:text-destructive"
+                        disabled={!selectedWorkspaceFile || loadingWorkspaceFile || savingWorkspaceFile || creatingWorkspaceEntry}
+                        onClick={handleDeleteWorkspaceEntry}
+                      >
+                        Supprimer
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
                         className="gap-2"
-                        disabled={!selectedWorkspaceFile || loadingWorkspaceFile || savingWorkspaceFile || workspaceFileContent === workspaceSavedContent}
+                        disabled={!selectedWorkspaceFile || loadingWorkspaceFile || savingWorkspaceFile || workspaceFileContent === workspaceSavedContent || creatingWorkspaceEntry || !!selectedWorkspaceEntry?.is_dir}
                         onClick={handleSaveWorkspaceFile}
                       >
                         {savingWorkspaceFile ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
@@ -1207,12 +1351,39 @@ export default function ProjectDashboard() {
                       </Button>
                     </div>
                   </div>
-                  <textarea
-                    value={loadingWorkspaceFile ? 'Chargement du contenu...' : workspaceFileContent}
-                    onChange={(event) => setWorkspaceFileContent(event.target.value)}
-                    disabled={loadingWorkspaceFile || !selectedWorkspaceFile}
-                    className="h-[320px] w-full resize-none rounded-lg border border-border/60 bg-[#05070d] p-3 font-mono text-xs leading-relaxed text-zinc-300 focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-70"
-                  />
+                  <div className="mb-3 flex flex-col gap-2 rounded-lg border border-border/60 bg-[#05070d] p-3">
+                    <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">Renommer / déplacer</div>
+                    <div className="flex gap-2">
+                      <input
+                        value={workspaceMovePath}
+                        onChange={(event) => setWorkspaceMovePath(event.target.value)}
+                        placeholder="nouveau/chemin"
+                        disabled={!selectedWorkspaceFile || creatingWorkspaceEntry}
+                        className="h-10 flex-1 rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={!selectedWorkspaceFile || !workspaceMovePath.trim() || workspaceMovePath.trim() === selectedWorkspaceFile || creatingWorkspaceEntry}
+                        onClick={handleMoveWorkspaceEntry}
+                      >
+                        Renommer
+                      </Button>
+                    </div>
+                  </div>
+                  {selectedWorkspaceEntry?.is_dir ? (
+                    <div className="flex h-[320px] items-center justify-center rounded-lg border border-border/60 bg-[#05070d] p-6 text-center text-sm text-muted-foreground">
+                      Dossier sélectionné. Tu peux le renommer, le déplacer ou le supprimer.
+                    </div>
+                  ) : (
+                    <textarea
+                      value={loadingWorkspaceFile ? 'Chargement du contenu...' : workspaceFileContent}
+                      onChange={(event) => setWorkspaceFileContent(event.target.value)}
+                      disabled={loadingWorkspaceFile || !selectedWorkspaceFile}
+                      className="h-[320px] w-full resize-none rounded-lg border border-border/60 bg-[#05070d] p-3 font-mono text-xs leading-relaxed text-zinc-300 focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-70"
+                    />
+                  )}
                 </div>
               </CardContent>
             </Card>

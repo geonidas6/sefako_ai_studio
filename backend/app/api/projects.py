@@ -1,4 +1,5 @@
 import io
+import shutil
 import uuid
 import zipfile
 from pathlib import Path
@@ -119,14 +120,17 @@ def _build_markdown_export(project: Project) -> str:
     return '\n'.join(sections).strip() + '\n'
 
 
-def _workspace_tree(project_dir: Path) -> list[dict[str, str]]:
-    items: list[dict[str, str]] = []
-    for file_path in sorted(project_dir.rglob('*')):
-        if file_path.is_dir():
-            continue
-        resolved = ensure_within_workspace(project_dir, file_path)
+def _workspace_tree(project_dir: Path) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for entry_path in sorted(project_dir.rglob('*')):
+        resolved = ensure_within_workspace(project_dir, entry_path)
         rel = resolved.relative_to(project_dir).as_posix()
-        items.append({'path': rel, 'name': resolved.name})
+        items.append({
+            'path': rel,
+            'name': resolved.name,
+            'is_dir': resolved.is_dir(),
+            'kind': 'directory' if resolved.is_dir() else 'file',
+        })
     return items
 
 class ProjectCreateIn(BaseModel):
@@ -165,6 +169,17 @@ class ImplementationStartIn(BaseModel):
 class WorkspaceFileUpdateIn(BaseModel):
     path: str
     content: str
+
+
+class WorkspaceCreateIn(BaseModel):
+    path: str
+    is_directory: bool = False
+    content: str = ""
+
+
+class WorkspaceMoveIn(BaseModel):
+    old_path: str
+    new_path: str
 
 
 def project_to_dict(p: Project) -> ProjectOut:
@@ -496,6 +511,156 @@ async def update_project_workspace_file(
         "employee": {"name": "Elias", "role": "Architecte logiciel", "avatar": "AR"},
         "message": f"J'ai mis à jour le fichier `{relative_path}` dans le workspace projet sans sortir du périmètre autorisé.",
         "phase": "workspace_edit",
+        "target": "repo projet",
+        "round": 4,
+    })
+    return {"success": True, "path": relative_path}
+
+
+@router.post("/{project_id}/workspace/create")
+async def create_project_workspace_entry(
+    project_id: str,
+    body: WorkspaceCreateIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+
+    relative_path = (body.path or '').strip().strip('/')
+    if not relative_path:
+        raise HTTPException(status_code=400, detail="Chemin invalide")
+
+    target = ensure_within_workspace(project_dir, project_dir / relative_path)
+    if target.exists():
+        raise HTTPException(status_code=400, detail="Le chemin existe déjà")
+
+    if body.is_directory:
+        target.mkdir(parents=True, exist_ok=False)
+        message = f"Dossier créé : {relative_path}"
+        employee_message = f"J'ai créé le dossier `{relative_path}` dans le workspace projet pour préparer la suite de l'implémentation."
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if len(body.content) > 1_000_000:
+            raise HTTPException(status_code=400, detail="Contenu initial trop volumineux")
+        target.write_text(body.content)
+        message = f"Fichier créé : {relative_path}"
+        employee_message = f"J'ai créé le fichier `{relative_path}` dans le workspace projet afin d'avancer sur la phase applicative."
+
+    await publish_project_event(project_id, {
+        "type": "implementation_status",
+        "message": message,
+        "pipeline": dict((project.final_deliverables or {}).get(IMPLEMENTATION_PIPELINE_KEY) or {}),
+    })
+    await publish_project_event(project_id, {
+        "type": "employee_message",
+        "agent": "engineering",
+        "department": "Ingénierie",
+        "employee": {"name": "Elias", "role": "Architecte logiciel", "avatar": "AR"},
+        "message": employee_message,
+        "phase": "workspace_create",
+        "target": "repo projet",
+        "round": 4,
+    })
+    return {"success": True, "path": relative_path, "is_directory": body.is_directory}
+
+
+@router.post("/{project_id}/workspace/move")
+async def move_project_workspace_entry(
+    project_id: str,
+    body: WorkspaceMoveIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+
+    old_path = (body.old_path or '').strip().strip('/')
+    new_path = (body.new_path or '').strip().strip('/')
+    if not old_path or not new_path:
+        raise HTTPException(status_code=400, detail="Chemins invalides")
+
+    source = ensure_within_workspace(project_dir, project_dir / old_path)
+    destination = ensure_within_workspace(project_dir, project_dir / new_path)
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="Source introuvable")
+    if destination.exists():
+        raise HTTPException(status_code=400, detail="La destination existe déjà")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source.rename(destination)
+
+    await publish_project_event(project_id, {
+        "type": "implementation_status",
+        "message": f"Entrée déplacée/renommée : {old_path} -> {new_path}",
+        "pipeline": dict((project.final_deliverables or {}).get(IMPLEMENTATION_PIPELINE_KEY) or {}),
+    })
+    await publish_project_event(project_id, {
+        "type": "employee_message",
+        "agent": "engineering",
+        "department": "Ingénierie",
+        "employee": {"name": "Elias", "role": "Architecte logiciel", "avatar": "AR"},
+        "message": f"J'ai renommé ou déplacé `{old_path}` vers `{new_path}` dans le workspace projet, sans sortir du dossier autorisé.",
+        "phase": "workspace_move",
+        "target": "repo projet",
+        "round": 4,
+    })
+    return {"success": True, "old_path": old_path, "new_path": new_path}
+
+
+@router.delete("/{project_id}/workspace/entry")
+async def delete_project_workspace_entry(
+    project_id: str,
+    path: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+
+    relative_path = (path or '').strip().strip('/')
+    if not relative_path:
+        raise HTTPException(status_code=400, detail="Chemin invalide")
+    target = ensure_within_workspace(project_dir, project_dir / relative_path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Chemin introuvable")
+
+    if target.is_dir():
+        shutil.rmtree(target)
+        human_kind = 'Dossier'
+        employee_message = f"J'ai supprimé le dossier `{relative_path}` du workspace projet pour nettoyer le périmètre de travail."
+    else:
+        target.unlink()
+        human_kind = 'Fichier'
+        employee_message = f"J'ai supprimé le fichier `{relative_path}` du workspace projet pour garder un repo cohérent."
+
+    await publish_project_event(project_id, {
+        "type": "implementation_status",
+        "message": f"{human_kind} supprimé : {relative_path}",
+        "pipeline": dict((project.final_deliverables or {}).get(IMPLEMENTATION_PIPELINE_KEY) or {}),
+    })
+    await publish_project_event(project_id, {
+        "type": "employee_message",
+        "agent": "engineering",
+        "department": "Ingénierie",
+        "employee": {"name": "Elias", "role": "Architecte logiciel", "avatar": "AR"},
+        "message": employee_message,
+        "phase": "workspace_delete",
         "target": "repo projet",
         "round": 4,
     })

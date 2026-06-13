@@ -174,6 +174,23 @@ export const api = {
         body: JSON.stringify({ path: filePath, content }),
       });
     },
+    async createWorkspaceEntry(id: string, filePath: string, isDirectory = false, content = '') {
+      return request(`/projects/${id}/workspace/create`, {
+        method: 'POST',
+        body: JSON.stringify({ path: filePath, is_directory: isDirectory, content }),
+      });
+    },
+    async deleteWorkspaceEntry(id: string, filePath: string) {
+      return request(`/projects/${id}/workspace/entry?path=${encodeURIComponent(filePath)}`, {
+        method: 'DELETE',
+      });
+    },
+    async moveWorkspaceEntry(id: string, oldPath: string, newPath: string) {
+      return request(`/projects/${id}/workspace/move`, {
+        method: 'POST',
+        body: JSON.stringify({ old_path: oldPath, new_path: newPath }),
+      });
+    },
     async downloadWorkspaceArchive(id: string) {
       return downloadFile(`/projects/${id}/workspace/archive`, `workspace-${id}.zip`);
     },
