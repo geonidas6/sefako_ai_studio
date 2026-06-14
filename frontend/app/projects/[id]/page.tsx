@@ -799,8 +799,17 @@ export default function ProjectDashboard() {
         setCurrentRound(null);
         setRunningAgents({});
         setAgentStatuses({ strategy: 'Terminé', ux: 'Terminé', engineering: 'Terminé', devops: 'Terminé', orchestrator: 'Terminé' });
-        if (event.deliverables) {
-          setProject((prev: any) => ({ ...prev, status: 'completed', final_deliverables: event.deliverables }));
+        setProject((prev: any) => ({
+          ...prev,
+          status: 'completed',
+          final_deliverables: {
+            ...(prev?.final_deliverables || {}),
+            ...(event.deliverables || {}),
+            ...(event.pipeline ? { implementation_pipeline: event.pipeline } : {}),
+            ...(event.workspace ? { implementation_workspace: event.workspace } : {}),
+          },
+        }));
+        if (event.deliverables || event.pipeline || event.workspace) {
           setActiveTab('deliverables');
           setDeliverableReviewRound('round3');
         }
@@ -810,7 +819,16 @@ export default function ProjectDashboard() {
         setWsStatus('paused');
         setRunningAgents({});
         setAgentStatuses((prev) => ({ ...prev, orchestrator: 'En pause' }));
-        setProject((prev: any) => ({ ...prev, status: 'paused', final_deliverables: { error: event.message || 'Analyse mise en pause.' } }));
+        setProject((prev: any) => ({
+          ...prev,
+          status: 'paused',
+          final_deliverables: {
+            ...(prev?.final_deliverables || {}),
+            ...(event.pipeline ? { implementation_pipeline: event.pipeline } : {}),
+            ...(event.workspace ? { implementation_workspace: event.workspace } : {}),
+            error: event.message || 'Analyse mise en pause.',
+          },
+        }));
         break;
       case 'workflow_error':
       case 'error':
@@ -818,7 +836,16 @@ export default function ProjectDashboard() {
         setWsStatus('error');
         setRunningAgents({});
         setAgentStatuses((prev) => ({ ...prev, orchestrator: 'Bloqué' }));
-        setProject((prev: any) => ({ ...prev, status: 'failed', final_deliverables: { error: event.message || event.error } }));
+        setProject((prev: any) => ({
+          ...prev,
+          status: 'failed',
+          final_deliverables: {
+            ...(prev?.final_deliverables || {}),
+            ...(event.pipeline ? { implementation_pipeline: event.pipeline } : {}),
+            ...(event.workspace ? { implementation_workspace: event.workspace } : {}),
+            error: event.message || event.error,
+          },
+        }));
         break;
     }
   };
@@ -837,8 +864,13 @@ export default function ProjectDashboard() {
   );
 
   const deliverables = project.final_deliverables || {};
-  const workspaceInfo = deliverables.implementation_workspace || null;
   const implementationPipeline = deliverables.implementation_pipeline || null;
+  const workspaceInfo = deliverables.implementation_workspace || (implementationPipeline?.project_dir ? {
+    project_dir: implementationPipeline.project_dir,
+    root_path: implementationPipeline.root_path || '',
+    files: implementationPipeline.generated_files || [],
+    repo_name: implementationPipeline.project_dir.split('/').filter(Boolean).pop() || 'workspace',
+  } : null);
   const persistedWorkflowError = (project.status === 'failed' || project.status === 'paused') ? deliverables.error : '';
   const employeeRoster = [
     { agent: 'strategy', department: 'Stratégie', name: 'Aminata', role: 'Lead Growth', avatar: 'AG' },
@@ -1251,143 +1283,9 @@ export default function ProjectDashboard() {
             </Card>
           )}
 
-          {isAdminSession && workspaceInfo && (
-            <Card className="border-border/60">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <FolderTree className="h-4 w-4 text-primary" /> Fichiers du workspace
-                </CardTitle>
-                <CardDescription>
-                  Crée des fichiers/dossiers et modifie le repo généré, toujours dans le périmètre strict du dossier projet.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
-                <div className="space-y-3">
-                  <div className="rounded-xl border border-border/60 bg-muted/20 p-3">
-                    <div className="mb-2 text-[11px] uppercase tracking-[0.24em] text-muted-foreground">Nouveau dans le workspace</div>
-                    <div className="flex flex-col gap-2">
-                      <input
-                        value={newWorkspacePath}
-                        onChange={(event) => setNewWorkspacePath(event.target.value)}
-                        placeholder="src/app/page.tsx ou docs"
-                        className="h-10 rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-primary"
-                      />
-                      <div className="flex gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="flex-1 gap-2"
-                          disabled={creatingWorkspaceEntry || !newWorkspacePath.trim()}
-                          onClick={() => handleCreateWorkspaceEntry(false)}
-                        >
-                          {creatingWorkspaceEntry ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FilePlus2 className="h-3.5 w-3.5" />}
-                          Fichier
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          className="flex-1 gap-2"
-                          disabled={creatingWorkspaceEntry || !newWorkspacePath.trim()}
-                          onClick={() => handleCreateWorkspaceEntry(true)}
-                        >
-                          <FolderPlus className="h-3.5 w-3.5" />
-                          Dossier
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="max-h-[360px] overflow-y-auto rounded-xl border border-border/60 bg-muted/20 p-2">
-                  {loadingWorkspaceFiles ? (
-                    <div className="p-3 text-xs text-muted-foreground">Chargement des fichiers...</div>
-                  ) : workspaceFiles.length === 0 ? (
-                    <div className="p-3 text-xs text-muted-foreground">Aucun fichier détecté.</div>
-                  ) : workspaceFiles.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      onClick={() => { setSelectedWorkspaceFile(file.path); setWorkspaceMovePath(file.path); }}
-                      className={cn(
-                        'w-full rounded-lg px-3 py-2 text-left text-xs transition-colors',
-                        selectedWorkspaceFile === file.path ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        {file.is_dir ? <Folder className="h-3.5 w-3.5" /> : <FileCode2 className="h-3.5 w-3.5" />}
-                        <span className="truncate">{file.path}</span>
-                      </div>
-                    </button>
-                  ))}
-                  </div>
-                </div>
-                <div className="min-h-[360px] rounded-xl border border-border/60 bg-black p-4">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <div className="text-xs font-mono text-primary">{selectedWorkspaceFile || 'Sélectionne une entrée'}</div>
-                    <div className="flex items-center gap-2">
-                      {!selectedWorkspaceEntry?.is_dir && workspaceFileContent !== workspaceSavedContent && (
-                        <span className="text-[10px] uppercase tracking-widest text-amber-400">Modifié</span>
-                      )}
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="gap-2 text-destructive hover:text-destructive"
-                        disabled={!selectedWorkspaceFile || loadingWorkspaceFile || savingWorkspaceFile || creatingWorkspaceEntry}
-                        onClick={handleDeleteWorkspaceEntry}
-                      >
-                        Supprimer
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="gap-2"
-                        disabled={!selectedWorkspaceFile || loadingWorkspaceFile || savingWorkspaceFile || workspaceFileContent === workspaceSavedContent || creatingWorkspaceEntry || !!selectedWorkspaceEntry?.is_dir}
-                        onClick={handleSaveWorkspaceFile}
-                      >
-                        {savingWorkspaceFile ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                        Enregistrer
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="mb-3 flex flex-col gap-2 rounded-lg border border-border/60 bg-[#05070d] p-3">
-                    <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">Renommer / déplacer</div>
-                    <div className="flex gap-2">
-                      <input
-                        value={workspaceMovePath}
-                        onChange={(event) => setWorkspaceMovePath(event.target.value)}
-                        placeholder="nouveau/chemin"
-                        disabled={!selectedWorkspaceFile || creatingWorkspaceEntry}
-                        className="h-10 flex-1 rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-primary disabled:opacity-60"
-                      />
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={!selectedWorkspaceFile || !workspaceMovePath.trim() || workspaceMovePath.trim() === selectedWorkspaceFile || creatingWorkspaceEntry}
-                        onClick={handleMoveWorkspaceEntry}
-                      >
-                        Renommer
-                      </Button>
-                    </div>
-                  </div>
-                  {selectedWorkspaceEntry?.is_dir ? (
-                    <div className="flex h-[320px] items-center justify-center rounded-lg border border-border/60 bg-[#05070d] p-6 text-center text-sm text-muted-foreground">
-                      Dossier sélectionné. Tu peux le renommer, le déplacer ou le supprimer.
-                    </div>
-                  ) : (
-                    <textarea
-                      value={loadingWorkspaceFile ? 'Chargement du contenu...' : workspaceFileContent}
-                      onChange={(event) => setWorkspaceFileContent(event.target.value)}
-                      disabled={loadingWorkspaceFile || !selectedWorkspaceFile}
-                      className="h-[320px] w-full resize-none rounded-lg border border-border/60 bg-[#05070d] p-3 font-mono text-xs leading-relaxed text-zinc-300 focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-70"
-                    />
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+
+
+
 
           <Card className="min-h-[600px] border-border/60 shadow-xl">
             <CardHeader className="border-b border-border/40 space-y-3">
@@ -1489,6 +1387,14 @@ export default function ProjectDashboard() {
                 )}
                 {project.status === 'completed' && wsStatus !== 'running' && (
                   <>
+                    {isAdminSession && workspaceInfo && (
+                      <Button asChild variant="outline" className="gap-2">
+                        <Link href={`/projects/${projectId}/workspace`}>
+                          <FolderTree className="h-4 w-4" />
+                          Ouvrir l'IDE applicatif
+                        </Link>
+                      </Button>
+                    )}
                     {isAdminSession && !workspaceInfo && (
                       <Button onClick={handleStartTechnicalDesign} variant="outline" className="gap-2" disabled={startingTechnicalDesign}>
                         {startingTechnicalDesign ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitBranch className="h-4 w-4" />}

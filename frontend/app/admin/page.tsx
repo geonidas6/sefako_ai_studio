@@ -148,32 +148,56 @@ export default function AdminDashboard() {
     }
 
     async function loadAdminData() {
-      try {
-        const [projectsData, configsData, assignmentsData, departmentsData, costsData, workflowSettingsData, generationSettingsData, qwenAuthData] = await Promise.all([
-          api.projects.list(),
-          api.admin.getConfigs(),
-          api.admin.getAssignments(),
-          api.admin.getDepartments(),
-          api.admin.getCosts(),
-          api.admin.getWorkflowSettings(),
-          api.admin.getGenerationSettings(),
-          api.admin.getQwenAuthStatus(),
-        ]);
-        setProjects(projectsData);
-        setConfigs(configsData);
-        setAssignments(assignmentsData);
-        setDepartments(departmentsData);
-        setCosts(costsData);
-        setWorkflowSettings(workflowSettingsData);
-        setGenerationSettings(generationSettingsData);
-        setQwenAuth(qwenAuthData);
-      } catch (err: any) {
-        setError(err.message || 'Impossible de charger les données.');
-      } finally {
+      const results = await Promise.allSettled([
+        api.projects.list(),
+        api.admin.getConfigs(),
+        api.admin.getAssignments(),
+        api.admin.getDepartments(),
+        api.admin.getCosts(),
+        api.admin.getWorkflowSettings(),
+        api.admin.getGenerationSettings(),
+        api.admin.getQwenAuthStatus(),
+      ]);
+
+      const [projectsData, configsData, assignmentsData, departmentsData, costsData, workflowSettingsData, generationSettingsData, qwenAuthData] = results;
+
+      const failures = results.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
+      const authFailure = failures.find((item) => String(item.reason?.message || '').toLowerCase().includes('identifiants invalides'));
+
+      if (authFailure) {
+        api.auth.logout();
+        router.push('/admin/login');
         setLoading(false);
+        return;
       }
+
+      if (projectsData.status === 'fulfilled') setProjects(projectsData.value);
+      if (configsData.status === 'fulfilled') setConfigs(configsData.value);
+      if (assignmentsData.status === 'fulfilled') setAssignments(assignmentsData.value);
+      if (departmentsData.status === 'fulfilled') setDepartments(departmentsData.value);
+      if (costsData.status === 'fulfilled') setCosts(costsData.value);
+      if (workflowSettingsData.status === 'fulfilled') setWorkflowSettings(workflowSettingsData.value);
+      if (generationSettingsData.status === 'fulfilled') setGenerationSettings(generationSettingsData.value);
+      if (qwenAuthData.status === 'fulfilled') setQwenAuth(qwenAuthData.value);
+
+      if (failures.length > 0) {
+        const firstMessage = String(failures[0].reason?.message || "Certaines données admin n'ont pas pu être chargées.");
+        setError(`Chargement partiel : ${firstMessage}`);
+      }
+
+      setLoading(false);
     }
     loadAdminData();
+  }, [router]);
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      api.auth.logout();
+      router.push('/admin/login');
+    };
+
+    window.addEventListener('aia-auth-expired', handleAuthExpired as EventListener);
+    return () => window.removeEventListener('aia-auth-expired', handleAuthExpired as EventListener);
   }, [router]);
 
   const handleLogout = () => {
@@ -585,7 +609,14 @@ export default function AdminDashboard() {
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-          {departments.map((department) => (
+          {departments.length === 0 ? (
+            <Card className="border-dashed border-border/60 bg-muted/20 xl:col-span-2">
+              <CardContent className="p-10 text-center">
+                <p className="font-semibold">Aucun département chargé</p>
+                <p className="mt-1 text-sm text-muted-foreground">Le backend n'a renvoyé aucun employé ou le chargement a été partiel. Recharge la page après correction.</p>
+              </CardContent>
+            </Card>
+          ) : departments.map((department) => (
             <Card key={department.key} className={cn("border-border/70", department.is_enabled ? "" : "opacity-70")}>
               <CardHeader className="space-y-4">
                 <div className="flex items-start justify-between gap-4">
@@ -884,7 +915,14 @@ export default function AdminDashboard() {
           <Key className="h-5 w-5 text-primary" /> Configurateurs LLM
         </h3>
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-          {configs.map((config) => {
+          {configs.length === 0 ? (
+            <Card className="border-dashed border-border/60 bg-muted/20 md:col-span-2 xl:col-span-3">
+              <CardContent className="p-10 text-center">
+                <p className="font-semibold">Aucun provider chargé</p>
+                <p className="mt-1 text-sm text-muted-foreground">Les configurateurs LLM n'ont pas été récupérés. Le panneau reste visible et le reste des paramètres continue de fonctionner.</p>
+              </CardContent>
+            </Card>
+          ) : configs.map((config) => {
             const isEnabled = config.is_enabled;
             const activeModel = config.active_model || config.models[0] || '';
             const keyInput = apiKeys[config.provider] || '';

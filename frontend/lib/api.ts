@@ -1,7 +1,25 @@
 const API_BASE = '/api';
 
+function getStoredToken() {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem('token');
+}
+
+function isTokenExpired(token: string) {
+  try {
+    const payloadPart = token.split('.')[1];
+    if (!payloadPart) return true;
+    const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(normalized));
+    if (!payload?.exp) return false;
+    return Date.now() >= Number(payload.exp) * 1000;
+  } catch {
+    return true;
+  }
+}
+
 function getHeaders() {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const token = getStoredToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -49,6 +67,12 @@ export async function request(path: string, options: RequestInit = {}) {
       errorMsg = data.detail || errorMsg;
     } catch {
       // ignore
+    }
+
+    if (response.status === 401 && typeof window !== 'undefined') {
+      localStorage.removeItem('token');
+      localStorage.removeItem('username');
+      window.dispatchEvent(new CustomEvent('aia-auth-expired', { detail: { message: errorMsg } }));
     }
     throw new Error(errorMsg);
   }
@@ -102,10 +126,16 @@ export const api = {
     },
 
     isLoggedIn() {
-      if (typeof window !== 'undefined') {
-        return !!localStorage.getItem('token');
+      const token = getStoredToken();
+      if (!token) return false;
+      if (isTokenExpired(token)) {
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('token');
+          localStorage.removeItem('username');
+        }
+        return false;
       }
-      return false;
+      return true;
     },
 
     async checkAdminExists() {
@@ -196,6 +226,9 @@ export const api = {
     },
     async downloadMarkdownExport(id: string) {
       return downloadFile(`/projects/${id}/exports/markdown`, `aia-project-${id}.md`);
+    },
+    async getWorkspaceHostExportCommand(id: string) {
+      return request(`/projects/${id}/workspace/host-export-command`);
     },
     async delete(id: string) {
       return request(`/projects/${id}`, {

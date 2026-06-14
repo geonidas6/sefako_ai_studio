@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   Bot,
   ChevronRight,
+  Copy,
   Download,
   FileCode,
   FileCode2,
@@ -16,6 +17,7 @@ import {
   FolderPlus,
   FolderTree,
   Loader2,
+  PanelRightOpen,
   RefreshCw,
   Save,
   Search,
@@ -64,6 +66,78 @@ type OpenFile = {
   isDirty: boolean;
 };
 
+type WorkspaceTreeNode = {
+  path: string;
+  name: string;
+  isDir: boolean;
+  children: WorkspaceTreeNode[];
+};
+
+function normalizeWorkspacePath(path: string = ''): string {
+  return path.replace(/^\/+|\/+$/g, '');
+}
+
+function getAncestorPaths(path: string = ''): string[] {
+  const cleaned = normalizeWorkspacePath(path);
+  if (!cleaned) return [];
+  const segments = cleaned.split('/');
+  const ancestors: string[] = [];
+  let current = '';
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    current = current ? `${current}/${segments[index]}` : segments[index];
+    ancestors.push(current);
+  }
+  return ancestors;
+}
+
+function sortWorkspaceTree(nodes: WorkspaceTreeNode[]): WorkspaceTreeNode[] {
+  return [...nodes]
+    .sort((left, right) => {
+      if (left.isDir !== right.isDir) return left.isDir ? -1 : 1;
+      return left.name.localeCompare(right.name, 'fr', { sensitivity: 'base' });
+    })
+    .map((node) => ({ ...node, children: sortWorkspaceTree(node.children) }));
+}
+
+function buildWorkspaceTree(entries: WorkspaceEntry[]): WorkspaceTreeNode[] {
+  const root: WorkspaceTreeNode = { path: '', name: '', isDir: true, children: [] };
+  const lookup = new Map<string, WorkspaceTreeNode>([['', root]]);
+  const sortedEntries = [...entries].sort((left, right) => left.path.localeCompare(right.path, 'fr', { sensitivity: 'base' }));
+
+  for (const entry of sortedEntries) {
+    const cleaned = normalizeWorkspacePath(entry.path);
+    if (!cleaned) continue;
+
+    const segments = cleaned.split('/');
+    let parent = root;
+    let currentPath = '';
+
+    segments.forEach((segment, index) => {
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      const isLeaf = index === segments.length - 1;
+      const shouldBeDir = !isLeaf || Boolean(entry.is_dir);
+      let node = lookup.get(currentPath);
+
+      if (!node) {
+        node = {
+          path: currentPath,
+          name: segment,
+          isDir: shouldBeDir,
+          children: [],
+        };
+        lookup.set(currentPath, node);
+        parent.children.push(node);
+      } else if (shouldBeDir) {
+        node.isDir = true;
+      }
+
+      parent = node;
+    });
+  }
+
+  return sortWorkspaceTree(root.children);
+}
+
 function getLanguage(filename: string = ''): string {
   const lower = filename.toLowerCase();
   if (lower.endsWith('.tsx') || lower.endsWith('.ts')) return 'typescript';
@@ -99,6 +173,7 @@ export default function ProjectWorkspaceIdePage() {
   const [newWorkspacePath, setNewWorkspacePath] = useState('');
   const [workspaceMovePath, setWorkspaceMovePath] = useState('');
   const [fileFilter, setFileFilter] = useState('');
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({});
 
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFileIndex, setActiveFileIndex] = useState(-1);
@@ -108,6 +183,8 @@ export default function ProjectWorkspaceIdePage() {
   const [startingImplementation, setStartingImplementation] = useState(false);
   const [downloadingWorkspace, setDownloadingWorkspace] = useState(false);
   const [downloadingMarkdown, setDownloadingMarkdown] = useState(false);
+  const [copyingHostExportCommand, setCopyingHostExportCommand] = useState(false);
+  const [hostExportCommand, setHostExportCommand] = useState<{ command: string; destination: string } | null>(null);
 
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [conversation, setConversation] = useState<ConversationItem[]>([]);
@@ -116,9 +193,15 @@ export default function ProjectWorkspaceIdePage() {
   const [agentStatuses, setAgentStatuses] = useState<Record<string, string>>({});
   const [runningAgents, setRunningAgents] = useState<Record<string, boolean>>({});
   const [wsStatus, setWsStatus] = useState<'connecting' | 'running' | 'idle' | 'error' | 'paused'>('idle');
+  const [teamDrawerOpen, setTeamDrawerOpen] = useState(false);
 
-  const workspaceInfo = project?.final_deliverables?.implementation_workspace || null;
   const implementationPipeline = project?.final_deliverables?.implementation_pipeline || null;
+  const workspaceInfo = project?.final_deliverables?.implementation_workspace || (implementationPipeline?.project_dir ? {
+    project_dir: implementationPipeline.project_dir,
+    root_path: implementationPipeline.root_path || '',
+    files: implementationPipeline.generated_files || [],
+    repo_name: implementationPipeline.project_dir.split('/').filter(Boolean).pop() || 'workspace',
+  } : null);
   const selectedWorkspaceEntry = workspaceFiles.find((entry) => entry.path === selectedEntryPath) || null;
   const activeFile = activeFileIndex >= 0 ? openFiles[activeFileIndex] : null;
 
@@ -138,6 +221,26 @@ export default function ProjectWorkspaceIdePage() {
     if (!query) return workspaceFiles;
     return workspaceFiles.filter((entry) => entry.path.toLowerCase().includes(query));
   }, [fileFilter, workspaceFiles]);
+
+  const workspaceTree = useMemo(() => buildWorkspaceTree(filteredFiles), [filteredFiles]);
+
+  useEffect(() => {
+    setExpandedDirs((prev) => {
+      const next = { ...prev };
+      workspaceTree.forEach((node) => {
+        if (next[node.path] === undefined) next[node.path] = true;
+      });
+      if (fileFilter.trim()) {
+        workspaceFiles.forEach((entry) => {
+          if (entry.is_dir) next[entry.path] = true;
+        });
+      }
+      getAncestorPaths(selectedEntryPath).forEach((ancestor) => {
+        next[ancestor] = true;
+      });
+      return next;
+    });
+  }, [workspaceTree, fileFilter, workspaceFiles, selectedEntryPath]);
 
   useEffect(() => {
     if (logsEndRef.current) {
@@ -246,6 +349,39 @@ export default function ProjectWorkspaceIdePage() {
       return next;
     });
   };
+
+  const refreshCleanOpenFiles = useCallback(async () => {
+    const refreshableFiles = openFiles.filter((file) => !file.isDirty);
+    if (!refreshableFiles.length) return;
+
+    const refreshed = await Promise.all(
+      refreshableFiles.map(async (file) => {
+        try {
+          const data = await api.projects.getWorkspaceFile(projectId, file.path);
+          return [file.path, data.content || ''] as const;
+        } catch {
+          return [file.path, null] as const;
+        }
+      })
+    );
+
+    const refreshedMap = new Map(
+      refreshed.filter((item): item is readonly [string, string] => item[1] !== null)
+    );
+
+    if (!refreshedMap.size) return;
+
+    setOpenFiles((prev) => prev.map((file) => {
+      if (file.isDirty || !refreshedMap.has(file.path)) return file;
+      const content = refreshedMap.get(file.path) || '';
+      return {
+        ...file,
+        content,
+        originalContent: content,
+        isDirty: false,
+      };
+    }));
+  }, [openFiles, projectId]);
 
   const handleEditorChange = (value?: string) => {
     const content = value || '';
@@ -415,6 +551,23 @@ export default function ProjectWorkspaceIdePage() {
     }
   };
 
+  const handleCopyHostExportCommand = async () => {
+    setCopyingHostExportCommand(true);
+    try {
+      const data = await api.projects.getWorkspaceHostExportCommand(projectId);
+      await navigator.clipboard.writeText(data.command);
+      setHostExportCommand({ command: data.command, destination: data.destination });
+      setLogs((prev) => [...prev, {
+        text: `Commande export /opt copiée. Destination: ${data.destination}`,
+        type: 'success',
+      }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || "Impossible de préparer l'export vers /opt.", type: 'error' }]);
+    } finally {
+      setCopyingHostExportCommand(false);
+    }
+  };
+
   const handleWsEvent = (event: WsEvent) => {
     if (event.sequence && seenEventSequencesRef.current.has(event.sequence)) return;
     if (event.sequence) seenEventSequencesRef.current.add(event.sequence);
@@ -449,6 +602,7 @@ export default function ProjectWorkspaceIdePage() {
         }
         setLogs((prev) => [...prev, { text: event.message || 'Phase terminée.', type: 'success' }]);
         void loadWorkspaceTree(selectedEntryPath);
+        void refreshCleanOpenFiles();
         break;
       case 'workflow_error':
       case 'implementation_error':
@@ -523,6 +677,7 @@ export default function ProjectWorkspaceIdePage() {
         }
         setLogs((prev) => [...prev, { text: event.message || 'Mise à jour du workspace.', type: 'system' }]);
         void loadWorkspaceTree(selectedEntryPath);
+        void refreshCleanOpenFiles();
         break;
       case 'error':
         setWsStatus('error');
@@ -666,6 +821,10 @@ export default function ProjectWorkspaceIdePage() {
                 <RefreshCw className={cn('h-4 w-4', loadingWorkspaceFiles && 'animate-spin')} />
                 Actualiser
               </Button>
+              <Button type="button" variant="outline" className="gap-2" onClick={() => setTeamDrawerOpen(true)}>
+                <PanelRightOpen className="h-4 w-4" />
+                Équipe & logs
+              </Button>
               <Button type="button" variant="outline" className="gap-2" disabled={downloadingMarkdown} onClick={handleDownloadMarkdown}>
                 {downloadingMarkdown ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                 Export markdown
@@ -673,6 +832,10 @@ export default function ProjectWorkspaceIdePage() {
               <Button type="button" variant="outline" className="gap-2" disabled={!workspaceInfo || downloadingWorkspace} onClick={handleDownloadWorkspace}>
                 {downloadingWorkspace ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                 Télécharger ZIP
+              </Button>
+              <Button type="button" variant="outline" className="gap-2" disabled={!workspaceInfo || copyingHostExportCommand} onClick={handleCopyHostExportCommand}>
+                {copyingHostExportCommand ? <Loader2 className="h-4 w-4 animate-spin" /> : <Copy className="h-4 w-4" />}
+                Préparer export /opt
               </Button>
               <Button
                 type="button"
@@ -685,9 +848,37 @@ export default function ProjectWorkspaceIdePage() {
               </Button>
             </div>
           </div>
+          {hostExportCommand && (
+            <div className="mt-4 rounded-2xl border border-primary/30 bg-primary/5 p-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold uppercase tracking-[0.24em] text-primary">Commande à lancer sur le VPS</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    La commande a été copiée. Colle-la dans ton terminal SSH pour exporter le workspace vers{' '}
+                    <span className="font-mono text-foreground">{hostExportCommand.destination}</span>.
+                  </p>
+                  <pre className="mt-3 overflow-x-auto rounded-xl border border-border/60 bg-black/70 p-3 text-xs text-zinc-100">
+                    <code>{hostExportCommand.command}</code>
+                  </pre>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="gap-2"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(hostExportCommand.command);
+                    setLogs((prev) => [...prev, { text: 'Commande export /opt recopiée.', type: 'success' }]);
+                  }}
+                >
+                  <Copy className="h-4 w-4" />
+                  Copier
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
+        <div className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
           <Card className="min-h-0 overflow-hidden border-border/60 bg-muted/20">
             <CardHeader className="border-b border-border/40 pb-4">
               <div className="relative">
@@ -712,7 +903,7 @@ export default function ProjectWorkspaceIdePage() {
                   placeholder="src/app/page.tsx ou docs"
                   className="h-10 w-full rounded-xl border border-border/60 bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-primary"
                 />
-                <div className="flex gap-2">
+                <div className="flex shrink-0 gap-2">
                   <Button
                     type="button"
                     variant="outline"
@@ -745,25 +936,51 @@ export default function ProjectWorkspaceIdePage() {
                 <div className="p-4 text-sm text-muted-foreground">Aucune entrée détectée.</div>
               ) : (
                 <div className="space-y-1">
-                  {filteredFiles.map((file) => (
-                    <button
-                      key={file.path}
-                      type="button"
-                      onClick={() => void openWorkspaceFile(file)}
-                      className={cn(
-                        'w-full rounded-xl px-3 py-2 text-left text-sm transition-colors',
-                        selectedEntryPath === file.path
-                          ? 'bg-primary/10 text-primary'
-                          : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        {file.is_dir ? <Folder className="h-4 w-4" /> : <FileCode2 className="h-4 w-4" />}
-                        <span className="truncate">{file.path}</span>
-                        {file.is_dir ? <ChevronRight className="ml-auto h-3 w-3 opacity-40" /> : null}
-                      </div>
-                    </button>
-                  ))}
+                  {workspaceTree.map((node) => {
+                    const renderNode = (treeNode: WorkspaceTreeNode, depth = 0): React.ReactNode => {
+                      const entry = workspaceFiles.find((item) => item.path === treeNode.path) || {
+                        path: treeNode.path,
+                        name: treeNode.name,
+                        is_dir: treeNode.isDir,
+                      };
+                      const isExpanded = expandedDirs[treeNode.path] ?? depth === 0;
+                      const isSelected = selectedEntryPath === treeNode.path;
+                      const hasChildren = treeNode.children.length > 0;
+
+                      return (
+                        <div key={treeNode.path}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void openWorkspaceFile(entry);
+                              if (treeNode.isDir && hasChildren) {
+                                setExpandedDirs((prev) => ({ ...prev, [treeNode.path]: !isExpanded }));
+                              }
+                            }}
+                            className={cn(
+                              'flex w-full items-center gap-2 rounded-xl py-2 pr-3 text-left text-sm transition-colors',
+                              isSelected
+                                ? 'bg-primary/10 text-primary'
+                                : 'text-muted-foreground hover:bg-background/70 hover:text-foreground'
+                            )}
+                            style={{ paddingLeft: `${12 + depth * 16}px` }}
+                          >
+                            <ChevronRight className={cn('h-3.5 w-3.5 shrink-0 opacity-50 transition-transform', treeNode.isDir ? '' : 'opacity-0', treeNode.isDir && isExpanded && 'rotate-90')} />
+                            {treeNode.isDir ? <Folder className="h-4 w-4 shrink-0" /> : <FileCode2 className="h-4 w-4 shrink-0" />}
+                            <span className="min-w-0 flex-1 truncate">{treeNode.name}</span>
+                            {treeNode.isDir && hasChildren ? (
+                              <span className="text-[10px] uppercase tracking-widest text-muted-foreground/70">{treeNode.children.length}</span>
+                            ) : null}
+                          </button>
+                          {treeNode.isDir && isExpanded && hasChildren ? (
+                            <div>{treeNode.children.map((child) => renderNode(child, depth + 1))}</div>
+                          ) : null}
+                        </div>
+                      );
+                    };
+
+                    return renderNode(node);
+                  })}
                 </div>
               )}
             </CardContent>
@@ -912,129 +1129,170 @@ export default function ProjectWorkspaceIdePage() {
               </div>
             </div>
           </Card>
-
-          <div className="grid min-h-0 gap-4 lg:grid-rows-[220px_minmax(0,1fr)_260px]">
-            <Card className="min-h-0 overflow-hidden border-border/60 bg-muted/20">
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Users className="h-4 w-4 text-primary" />
-                  Employés & statut
-                </CardTitle>
-                <CardDescription>
-                  Vue rapide des équipes pendant la phase applicative.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="min-h-0 overflow-y-auto space-y-2">
-                {employeeRoster.map((employee) => (
-                  <div key={`${employee.avatar}-${employee.name}`} className="flex items-center justify-between rounded-xl border border-border/60 bg-background/60 px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="font-semibold">{employee.name}</div>
-                      <div className="truncate text-xs text-muted-foreground">{employee.role}</div>
-                    </div>
-                    <span
-                      className={cn(
-                        'rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-widest',
-                        runningAgents[employee.agent]
-                          ? 'border-primary/30 bg-primary/10 text-primary'
-                          : 'border-border/60 bg-muted/30 text-muted-foreground'
-                      )}
-                    >
-                      {agentStatuses[employee.agent] || (runningAgents[employee.agent] ? 'Travaille' : 'Disponible')}
-                    </span>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-
-            <Card className="min-h-0 overflow-hidden border-border/60 bg-muted/20">
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Bot className="h-4 w-4 text-primary" />
-                  Chat des employés
-                </CardTitle>
-                <CardDescription>
-                  Les messages que tu envoies ici sont ajoutés au contexte réel du projet.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
-                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto rounded-2xl border border-border/60 bg-background/40 p-3">
-                  {conversation.length === 0 ? (
-                    <div className="flex h-full items-center justify-center text-center text-sm text-muted-foreground">
-                      Les échanges des employés s’afficheront ici dès que le workflow poussera des messages.
-                    </div>
-                  ) : conversation.map((item, index) => (
-                    <div key={`${item.employee.avatar}-${index}`} className={cn(
-                      'rounded-2xl border px-3 py-3',
-                      item.kind === 'user'
-                        ? 'border-sky-500/20 bg-sky-500/5'
-                        : 'border-border/60 bg-background/60'
-                    )}>
-                      <div className="mb-1 flex items-center gap-2">
-                        <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-border/60 bg-background text-xs font-bold">
-                          {item.employee.avatar}
-                        </span>
-                        <div className="min-w-0">
-                          <div className="truncate font-semibold">{item.employee.name}</div>
-                          <div className="truncate text-[11px] text-muted-foreground">{item.employee.role}</div>
-                        </div>
-                      </div>
-                      <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-200">{item.message}</p>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex gap-2">
-                  <textarea
-                    value={chatInput}
-                    onChange={(event) => setChatInput(event.target.value)}
-                    placeholder="Ajouter une précision, contrainte, correction ou nouvelle exigence..."
-                    className="h-24 flex-1 resize-none rounded-2xl border border-border/60 bg-background px-4 py-3 text-sm outline-none focus:ring-1 focus:ring-primary"
-                  />
-                  <Button
-                    type="button"
-                    className="h-24 px-4"
-                    disabled={sendingMessage || !chatInput.trim()}
-                    onClick={handleSendMessage}
-                  >
-                    {sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="min-h-0 overflow-hidden border-border/60 bg-black">
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <TerminalSquare className="h-4 w-4 text-primary" />
-                  Logs système
-                </CardTitle>
-                <CardDescription>
-                  {implementationPipeline?.status ? `Pipeline: ${implementationPipeline.status}` : `Flux: ${wsStatus}`}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="min-h-0 overflow-y-auto rounded-b-2xl bg-black font-mono text-xs leading-6 text-zinc-300">
-                <div className="space-y-1 p-3">
-                  {logs.length === 0 ? (
-                    <div className="text-muted-foreground">Aucun log pour le moment.</div>
-                  ) : logs.map((log, index) => (
-                    <div
-                      key={`${log.text}-${index}`}
-                      className={cn(
-                        log.type === 'success' && 'text-emerald-400',
-                        log.type === 'error' && 'text-rose-400',
-                        log.type === 'info' && 'text-primary',
-                        log.type === 'system' && 'text-zinc-300'
-                      )}
-                    >
-                      {log.text}
-                    </div>
-                  ))}
-                  <div ref={logsEndRef} />
-                </div>
-              </CardContent>
-            </Card>
-          </div>
         </div>
       </div>
+
+      <button
+        type="button"
+        onClick={() => setTeamDrawerOpen(true)}
+        className={cn(
+          'fixed right-0 top-1/2 z-40 -translate-y-1/2 rounded-l-2xl border border-r-0 border-primary/30 bg-primary text-primary-foreground shadow-2xl shadow-primary/20 transition-transform hover:-translate-x-1',
+          teamDrawerOpen && 'translate-x-full'
+        )}
+        title="Ouvrir l'équipe et les logs"
+      >
+        <span className="flex items-center gap-2 px-3 py-4 [writing-mode:vertical-rl]">
+          <PanelRightOpen className="h-4 w-4 rotate-90" />
+          <span className="text-xs font-bold uppercase tracking-widest">Équipe</span>
+        </span>
+      </button>
+
+      {teamDrawerOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/45 backdrop-blur-[2px]"
+            onClick={() => setTeamDrawerOpen(false)}
+          />
+          <aside className="fixed bottom-0 right-0 top-0 z-50 flex w-full max-w-[540px] flex-col border-l border-border bg-background/95 shadow-2xl shadow-black/40 backdrop-blur-xl">
+            <div className="flex shrink-0 items-center justify-between border-b border-border/60 p-5">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-primary">Workspace live</p>
+                <h2 className="mt-1 text-xl font-bold">Équipe, chat & logs</h2>
+              </div>
+              <Button variant="ghost" size="icon" onClick={() => setTeamDrawerOpen(false)}>
+                <X className="h-5 w-5" />
+              </Button>
+            </div>
+
+            <div className="grid min-h-0 flex-1 grid-rows-[220px_minmax(0,1fr)_240px] gap-4 overflow-hidden p-4">
+              <Card className="flex min-h-0 flex-col overflow-hidden border-border/60 bg-muted/20">
+                <CardHeader className="shrink-0 pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Users className="h-4 w-4 text-primary" />
+                    Employés & statut
+                  </CardTitle>
+                  <CardDescription>
+                    Vue rapide des équipes pendant la phase applicative.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-3">
+                  {employeeRoster.map((employee) => (
+                    <div key={`${employee.avatar}-${employee.name}`} className="flex items-center justify-between rounded-xl border border-border/60 bg-background/60 px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="font-semibold">{employee.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">{employee.role}</div>
+                      </div>
+                      <span
+                        className={cn(
+                          'rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-widest',
+                          runningAgents[employee.agent]
+                            ? 'border-primary/30 bg-primary/10 text-primary'
+                            : 'border-border/60 bg-muted/30 text-muted-foreground'
+                        )}
+                      >
+                        {agentStatuses[employee.agent] || (runningAgents[employee.agent] ? 'Travaille' : 'Disponible')}
+                      </span>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+
+              <Card className="flex min-h-0 flex-col overflow-hidden border-border/60 bg-muted/20">
+                <CardHeader className="shrink-0 pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Bot className="h-4 w-4 text-primary" />
+                    Chat des employés
+                  </CardTitle>
+                  <CardDescription>
+                    Demande une nouvelle fonctionnalité, une correction ou une contrainte aux équipes IA.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+                  <div className="min-h-0 flex-1 space-y-3 overflow-y-auto rounded-2xl border border-border/60 bg-background/40 p-3 pr-4">
+                    {conversation.length === 0 ? (
+                      <div className="flex h-full items-center justify-center text-center text-sm text-muted-foreground">
+                        Les échanges des employés s'afficheront ici dès que le workflow poussera des messages.
+                      </div>
+                    ) : conversation.map((item, index) => (
+                      <div key={`${item.employee.avatar}-${index}`} className={cn(
+                        'rounded-2xl border px-3 py-3',
+                        item.kind === 'user'
+                          ? 'border-sky-500/20 bg-sky-500/5'
+                          : 'border-border/60 bg-background/60'
+                      )}>
+                        <div className="mb-1 flex items-center gap-2">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-border/60 bg-background text-xs font-bold">
+                            {item.employee.avatar}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="truncate font-semibold">{item.employee.name}</div>
+                            <div className="truncate text-[11px] text-muted-foreground">{item.employee.role}</div>
+                          </div>
+                        </div>
+                        <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-200">{item.message}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <textarea
+                      value={chatInput}
+                      onChange={(event) => setChatInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          void handleSendMessage();
+                        }
+                      }}
+                      placeholder="Demander une fonctionnalité, une correction ou une précision..."
+                      className="h-24 flex-1 resize-none rounded-2xl border border-border/60 bg-background px-4 py-3 text-sm outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    <Button
+                      type="button"
+                      className="h-24 px-4"
+                      disabled={sendingMessage || !chatInput.trim()}
+                      onClick={handleSendMessage}
+                    >
+                      {sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className="flex min-h-0 flex-col overflow-hidden border-border/60 bg-black">
+                <CardHeader className="shrink-0 pb-3">
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <TerminalSquare className="h-4 w-4 text-primary" />
+                    Logs système
+                  </CardTitle>
+                  <CardDescription>
+                    {implementationPipeline?.status ? `Pipeline: ${implementationPipeline.status}` : `Flux: ${wsStatus}`}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="min-h-0 flex-1 overflow-y-auto rounded-b-2xl bg-black pr-3 font-mono text-xs leading-6 text-zinc-300">
+                  <div className="space-y-1 p-3">
+                    {logs.length === 0 ? (
+                      <div className="text-muted-foreground">Aucun log pour le moment.</div>
+                    ) : logs.map((log, index) => (
+                      <div
+                        key={`${log.text}-${index}`}
+                        className={cn(
+                          log.type === 'success' && 'text-emerald-400',
+                          log.type === 'error' && 'text-rose-400',
+                          log.type === 'info' && 'text-primary',
+                          log.type === 'system' && 'text-zinc-300'
+                        )}
+                      >
+                        {log.text}
+                      </div>
+                    ))}
+                    <div ref={logsEndRef} />
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          </aside>
+        </>
+      )}
     </div>
   );
 }

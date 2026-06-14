@@ -157,6 +157,28 @@ def build_initial_pipeline(settings: WorkspaceSettings, workspace_info: dict[str
     }
 
 
+def infer_workspace_info_from_pipeline(pipeline: dict[str, Any] | None, settings: WorkspaceSettings) -> dict[str, Any] | None:
+    if not isinstance(pipeline, dict):
+        return None
+    project_dir = pipeline.get("project_dir")
+    if not project_dir:
+        return None
+    try:
+        resolved = Path(str(project_dir)).resolve()
+    except Exception:
+        return None
+    generated_files = pipeline.get("generated_files")
+    if not isinstance(generated_files, list):
+        generated_files = []
+    return {
+        "project_dir": str(resolved),
+        "root_path": pipeline.get("root_path") or settings.root_path,
+        "generated_at": pipeline.get("updated_at") or utc_now_iso(),
+        "files": generated_files,
+        "repo_name": resolved.name,
+    }
+
+
 def ensure_pipeline_metadata(deliverables: dict[str, Any] | None, settings: WorkspaceSettings) -> dict[str, Any]:
     payload = dict(deliverables or {})
     workspace_info = payload.get(IMPLEMENTATION_WORKSPACE_KEY)
@@ -176,6 +198,10 @@ def ensure_pipeline_metadata(deliverables: dict[str, Any] | None, settings: Work
     normalized.setdefault("last_error", None)
     normalized.setdefault("updated_at", utc_now_iso())
     normalized.setdefault("phases", _phase_status())
+    if not isinstance(workspace_info, dict):
+        inferred_workspace = infer_workspace_info_from_pipeline(normalized, settings)
+        if inferred_workspace:
+            payload[IMPLEMENTATION_WORKSPACE_KEY] = inferred_workspace
     payload[IMPLEMENTATION_PIPELINE_KEY] = normalized
     return payload
 

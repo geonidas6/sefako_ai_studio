@@ -26,9 +26,10 @@ router = APIRouter()
 def _get_workspace_dir(project: Project) -> Path | None:
     deliverables = dict(project.final_deliverables or {})
     workspace = deliverables.get(IMPLEMENTATION_WORKSPACE_KEY)
-    if not isinstance(workspace, dict):
-        return None
-    project_dir = workspace.get("project_dir")
+    project_dir = workspace.get("project_dir") if isinstance(workspace, dict) else None
+    if not project_dir:
+        pipeline = deliverables.get(IMPLEMENTATION_PIPELINE_KEY)
+        project_dir = pipeline.get("project_dir") if isinstance(pipeline, dict) else None
     if not project_dir:
         return None
     try:
@@ -180,6 +181,13 @@ class WorkspaceCreateIn(BaseModel):
 class WorkspaceMoveIn(BaseModel):
     old_path: str
     new_path: str
+
+
+class WorkspaceHostExportCommandOut(BaseModel):
+    project_dir: str
+    repo_name: str
+    destination: str
+    command: str
 
 
 def project_to_dict(p: Project) -> ProjectOut:
@@ -696,12 +704,47 @@ async def download_project_workspace_archive(
     )
 
 
+@router.get("/{project_id}/workspace/host-export-command", response_model=WorkspaceHostExportCommandOut)
+async def get_project_workspace_host_export_command(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+
+    repo_name = project_dir.name
+    if not repo_name or "/" in repo_name or repo_name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Nom de workspace invalide")
+
+    destination = f"/opt/{repo_name}"
+    command = f"cd /opt/sefako_ai_studio && ./scripts/export_workspace_to_host.sh {project.id}"
+    return WorkspaceHostExportCommandOut(
+        project_dir=str(project_dir),
+        repo_name=repo_name,
+        destination=destination,
+        command=command,
+    )
+
+
 @router.get("/{project_id}", response_model=ProjectOut)
 async def get_project(project_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
+    if isinstance(project.final_deliverables, dict):
+        settings = await get_workspace_settings(db)
+        normalized = ensure_pipeline_metadata(dict(project.final_deliverables or {}), settings)
+        if normalized != project.final_deliverables:
+            project.final_deliverables = normalized
+            await db.commit()
+            await db.refresh(project)
     return project_to_dict(project)
 
 
