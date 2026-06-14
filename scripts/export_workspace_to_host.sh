@@ -25,7 +25,7 @@ if [[ -z "$BACKEND_CONTAINER" ]]; then
   exit 1
 fi
 
-CONTAINER_WORKSPACE="$(docker exec "$BACKEND_CONTAINER" python - "$PROJECT_ID" <<'PY'
+CONTAINER_WORKSPACE="$(docker exec -i "$BACKEND_CONTAINER" python - "$PROJECT_ID" <<'PY'
 import asyncio
 import sys
 from pathlib import Path
@@ -64,6 +64,8 @@ async def main():
 asyncio.run(main())
 PY
 )"
+CONTAINER_WORKSPACE="$(printf '%s
+' "$CONTAINER_WORKSPACE" | awk '/^\/opt\// { value = $0 } END { print value }')"
 
 if [[ -z "$CONTAINER_WORKSPACE" ]]; then
   echo "Workspace introuvable dans le conteneur backend." >&2
