@@ -15,6 +15,8 @@ import re
 from datetime import datetime, timezone
 from typing import TypedDict, Optional, Any
 
+REQUIRED_DELIVERABLE_KEYS = {"cdc", "mcd", "architecture", "roadmap", "notes_synthese"}
+
 from langgraph.graph import StateGraph, START, END
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -144,6 +146,80 @@ def inject_mermaid_block(text: str, mermaid: str) -> str:
         return re.sub(r"```mermaid\s*[\s\S]*?```", fenced, text, count=1, flags=re.IGNORECASE)
     base = (text or "").strip()
     return f"{base}\n\n{fenced}".strip()
+
+
+def _strip_code_fences(text: str) -> str:
+    clean = (text or "").strip()
+    fenced = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", clean, re.IGNORECASE)
+    return fenced.group(1).strip() if fenced else clean
+
+
+def _extract_balanced_json(text: str) -> str:
+    source = text or ""
+    start = source.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(source)):
+        char = source[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    return ""
+
+
+def _parse_deliverables_json(raw: str) -> dict:
+    candidates: list[str] = []
+    clean = _strip_code_fences(raw)
+    if clean:
+        candidates.append(clean)
+    json_block = re.search(r"```json\s*([\s\S]*?)```", raw or "", re.IGNORECASE)
+    if json_block:
+        candidates.append(json_block.group(1).strip())
+    balanced = _extract_balanced_json(clean or raw or "")
+    if balanced:
+        candidates.append(balanced.strip())
+    if raw and raw.strip():
+        candidates.append(raw.strip())
+
+    decoder = json.JSONDecoder()
+    incomplete_error: RuntimeError | None = None
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                parsed, _ = decoder.raw_decode(candidate[candidate.find('{'):] if '{' in candidate else candidate)
+            except Exception:
+                continue
+        if not isinstance(parsed, dict):
+            continue
+        missing = [key for key in REQUIRED_DELIVERABLE_KEYS if not str(parsed.get(key) or "").strip()]
+        if missing:
+            incomplete_error = RuntimeError(
+                "L'orchestrateur IA a renvoyé un JSON incomplet pour les livrables. "
+                f"Champs manquants: {', '.join(missing)}"
+            )
+            continue
+        return {key: str(parsed.get(key) or "").strip() for key in REQUIRED_DELIVERABLE_KEYS}
+    if incomplete_error:
+        raise incomplete_error
+    raise RuntimeError("L'orchestrateur IA n'a pas retourné un JSON valide pour les livrables.")
 
 
 def preserve_deliverable_depth(deliverables: dict, r1: dict) -> dict:
@@ -283,15 +359,30 @@ def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue, cancel_event:
         from app.models.llm_config import LLMConfig
 
         result = await llm_router.db.execute(
-            select(LLMConfig).where(LLMConfig.provider == "workflow_debate_rounds")
+            select(LLMConfig).where(
+                LLMConfig.provider.in_(["workflow_debate_rounds", "workflow_final_json_retry_count"])
+            )
         )
-        cfg = result.scalar_one_or_none()
+        configs = {cfg.provider: cfg for cfg in result.scalars().all()}
         try:
-            configured = int((cfg.value if cfg else None) or 1)
+            configured = int((configs.get("workflow_debate_rounds").value if configs.get("workflow_debate_rounds") else None) or 1)
         except (TypeError, ValueError):
             configured = 1
-        workflow_settings_cache = {"debate_rounds": max(1, min(configured, 3))}
+        try:
+            json_retries = int((configs.get("workflow_final_json_retry_count").value if configs.get("workflow_final_json_retry_count") else None) or 2)
+        except (TypeError, ValueError):
+            json_retries = 2
+        workflow_settings_cache = {
+            "debate_rounds": max(1, min(configured, 3)),
+            "final_json_retry_count": max(0, min(json_retries, 5)),
+        }
         return workflow_settings_cache["debate_rounds"]
+
+    async def get_final_json_retry_count() -> int:
+        nonlocal workflow_settings_cache
+        if workflow_settings_cache is None:
+            await get_debate_rounds()
+        return workflow_settings_cache["final_json_retry_count"]
 
     async def persist_project_field(project_id: str, field: str, value: Any) -> None:
         from app.models.project import Project
@@ -526,23 +617,42 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
         }
 
         try:
-            raw = await llm_router.generate(
-                make_synthesis_prompt(await enriched_input(state), r1, critiques),
-                "orchestrator",
-                SYSTEM_PROMPTS["orchestrator"],
-            )
+            retry_count = await get_final_json_retry_count()
+            last_error: Exception | None = None
+            raw = ""
+            for attempt in range(retry_count + 1):
+                retry_notice = ""
+                if attempt > 0:
+                    retry_notice = (
+                        "\n\nIMPORTANT: ta tentative précédente n'était pas exploitable. "
+                        "Réponds uniquement avec un objet JSON brut strict, sans texte avant ni après, sans markdown."
+                    )
+                    await emit(
+                        "implementation_status",
+                        message=f"JSON final invalide détecté. Relance automatique {attempt}/{retry_count} de la synthèse orchestrateur.",
+                    )
+                    await speak(
+                        "orchestrator",
+                        "lead",
+                        f"La réponse finale précédente n'était pas exploitable en JSON. Je relance une synthèse propre, tentative {attempt}/{retry_count}.",
+                        final_round,
+                        "retry",
+                    )
 
-            # Parse JSON from the response. Invalid JSON is a real workflow error,
-            # not a reason to generate synthetic/static fallback deliverables.
-            clean = raw.strip()
-            if clean.startswith("```"):
-                clean = "\n".join(clean.split("\n")[1:])
-                if clean.endswith("```"):
-                    clean = clean[:-3]
-            try:
-                deliverables = json.loads(clean.strip())
-            except json.JSONDecodeError as e:
-                raise RuntimeError("L'orchestrateur IA n'a pas retourné un JSON valide pour les livrables.") from e
+                raw = await llm_router.generate(
+                    make_synthesis_prompt(await enriched_input(state), r1, critiques) + retry_notice,
+                    "orchestrator",
+                    SYSTEM_PROMPTS["orchestrator"],
+                )
+                try:
+                    deliverables = _parse_deliverables_json(raw)
+                    break
+                except Exception as parse_error:
+                    last_error = parse_error
+                    if attempt >= retry_count:
+                        raise
+            else:
+                raise last_error or RuntimeError("L'orchestrateur IA n'a pas retourné un JSON valide pour les livrables.")
 
             deliverables = preserve_deliverable_depth(deliverables, r1)
             ensure_not_paused()

@@ -490,7 +490,26 @@ export default function ProjectWorkspaceIdePage() {
     if (!content) return;
     setSendingMessage(true);
     try {
-      await api.projects.sendMessage(projectId, content);
+      const result = await api.projects.sendMessage(projectId, content, 'Workspace IDE');
+      if (result?.implementation_restart_triggered) {
+        setLogs((prev) => [...prev, {
+          text: 'Demande applicative reçue. Les employés relancent la livraison dans le workspace.',
+          type: 'system',
+        }]);
+        void loadProject();
+      } else if (result?.restart_triggered) {
+        setWsStatus('running');
+        setLogs((prev) => [...prev, {
+          text: 'Demande de correction reçue. Une nouvelle passe corrective a été relancée automatiquement à partir des checkpoints existants.',
+          type: 'system',
+        }]);
+        void loadProject();
+      } else {
+        setLogs((prev) => [...prev, {
+          text: 'Message ajouté au contexte du projet. Les employés en tiendront compte à la prochaine étape utile.',
+          type: 'info',
+        }]);
+      }
       setChatInput('');
     } catch (err: any) {
       setLogs((prev) => [...prev, { text: err.message || "Impossible d'envoyer le message.", type: 'error' }]);
@@ -799,10 +818,10 @@ export default function ProjectWorkspaceIdePage() {
                   Initialiser la conception technique
                 </Button>
               )}
-              {workspaceInfo && implementationPipeline?.status !== 'completed' && implementationPipeline?.status !== 'running' && (
+              {workspaceInfo && implementationPipeline?.status !== 'running' && (
                 <Button type="button" variant="outline" className="gap-2" disabled={startingImplementation} onClick={handleStartImplementation}>
                   {startingImplementation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  Lancer la phase applicative
+                  {implementationPipeline?.status === 'completed' ? 'Relancer la livraison' : 'Lancer la phase applicative'}
                 </Button>
               )}
               {implementationPipeline?.status === 'running' && (
@@ -848,6 +867,28 @@ export default function ProjectWorkspaceIdePage() {
               </Button>
             </div>
           </div>
+          {Array.isArray(implementationPipeline?.phases) && implementationPipeline.phases.length > 0 && (
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+              {implementationPipeline.phases.map((phase: any) => (
+                <div
+                  key={phase.key}
+                  className={cn(
+                    'rounded-xl border px-3 py-2 text-xs',
+                    phase.status === 'completed'
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                      : phase.status === 'running'
+                        ? 'border-primary/30 bg-primary/10 text-primary'
+                        : phase.status === 'failed'
+                          ? 'border-destructive/40 bg-destructive/10 text-destructive'
+                          : 'border-border/60 bg-background/50 text-muted-foreground'
+                  )}
+                >
+                  <div className="truncate font-semibold">{phase.label}</div>
+                  <div className="mt-1 uppercase tracking-widest opacity-80">{phase.status}</div>
+                </div>
+              ))}
+            </div>
+          )}
           {hostExportCommand && (
             <div className="mt-4 rounded-2xl border border-primary/30 bg-primary/5 p-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -1204,7 +1245,7 @@ export default function ProjectWorkspaceIdePage() {
                     Chat des employés
                   </CardTitle>
                   <CardDescription>
-                    Demande une nouvelle fonctionnalité, une correction ou une contrainte aux équipes IA.
+                    Demande une nouvelle fonctionnalité, une correction ou une contrainte aux équipes IA. Si le projet est déjà terminé, une passe corrective peut être relancée automatiquement.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">

@@ -39,6 +39,9 @@ import { connectProjectWs, WsEvent } from '../../../lib/websocket';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
+import { AuthGuard } from '@/components/auth-guard';
+
+const CLEAN_MD_REGEX = /[#*_`>-]/g;
 
 // Simple lightweight Markdown to HTML converter
 function parseMarkdown(md: string = ''): string {
@@ -95,131 +98,6 @@ function looksUsableMermaidErDiagram(chart: string = ''): boolean {
   const openBraces = (normalized.match(/\{/g) || []).length;
   const closeBraces = (normalized.match(/\}/g) || []).length;
   return hasRelation && openBraces > 0 && openBraces === closeBraces;
-}
-
-function buildFallbackErDiagram(content: string = '', projectText: string = ''): string {
-  const source = `${content} ${projectText}`.toLowerCase();
-  const isLearning = /e-learning|learning|cours|quiz|apprenant|tuteur|chatbot|leçon/.test(source);
-  const isMarketplace = /freelance|client|mission|prestation|contrat/.test(source);
-  const isRestaurant = /restaurant|facture|stock|commande|fournisseur/.test(source);
-
-  if (isLearning) {
-    return `erDiagram
-  USER ||--o{ ENROLLMENT : suit
-  COURSE ||--o{ ENROLLMENT : contient
-  COURSE ||--o{ LESSON : organise
-  LESSON ||--o{ QUIZ : valide
-  QUIZ ||--o{ QUESTION : contient
-  USER ||--o{ QUIZ_ATTEMPT : realise
-  USER ||--o{ CHAT_SESSION : dialogue
-  CHAT_SESSION ||--o{ CHAT_MESSAGE : contient
-
-  USER {
-    uuid id PK
-    string email
-    string role
-    datetime created_at
-  }
-  COURSE {
-    uuid id PK
-    string title
-    string level
-    string status
-  }
-  LESSON {
-    uuid id PK
-    uuid course_id FK
-    string title
-    text content
-  }
-  QUIZ {
-    uuid id PK
-    uuid lesson_id FK
-    int passing_score
-  }
-  QUESTION {
-    uuid id PK
-    uuid quiz_id FK
-    text prompt
-    text answer
-  }
-  ENROLLMENT {
-    uuid id PK
-    uuid user_id FK
-    uuid course_id FK
-    string progress
-  }
-  QUIZ_ATTEMPT {
-    uuid id PK
-    uuid user_id FK
-    uuid quiz_id FK
-    int score
-  }
-  CHAT_SESSION {
-    uuid id PK
-    uuid user_id FK
-    string context
-  }
-  CHAT_MESSAGE {
-    uuid id PK
-    uuid session_id FK
-    string sender
-    text content
-  }`;
-  }
-
-  if (isRestaurant) {
-    return `erDiagram
-  RESTAURANT ||--o{ INVOICE : importe
-  INVOICE ||--o{ INVOICE_LINE : contient
-  PRODUCT ||--o{ INVOICE_LINE : apparait
-  PRODUCT ||--o{ STOCK_MOVEMENT : genere
-  SUPPLIER ||--o{ PURCHASE_ORDER : recoit
-  PURCHASE_ORDER ||--o{ PURCHASE_ORDER_LINE : contient
-
-  RESTAURANT { uuid id PK string name }
-  INVOICE { uuid id PK uuid restaurant_id FK datetime imported_at }
-  INVOICE_LINE { uuid id PK uuid invoice_id FK uuid product_id FK int quantity }
-  PRODUCT { uuid id PK string name int current_stock int alert_threshold }
-  STOCK_MOVEMENT { uuid id PK uuid product_id FK int quantity string type }
-  SUPPLIER { uuid id PK string name string email }
-  PURCHASE_ORDER { uuid id PK uuid supplier_id FK string status }
-  PURCHASE_ORDER_LINE { uuid id PK uuid order_id FK uuid product_id FK int quantity }`;
-  }
-
-  if (isMarketplace) {
-    return `erDiagram
-  USER ||--o{ PROJECT : cree
-  PROJECT ||--o{ PROPOSAL : recoit
-  FREELANCER ||--o{ PROPOSAL : soumet
-  PROJECT ||--o{ CONTRACT : formalise
-  CONTRACT ||--o{ MILESTONE : planifie
-  MILESTONE ||--o{ DELIVERABLE : produit
-
-  USER { uuid id PK string email string role }
-  FREELANCER { uuid id PK string name string skills }
-  PROJECT { uuid id PK uuid client_id FK string title string status }
-  PROPOSAL { uuid id PK uuid project_id FK uuid freelancer_id FK decimal budget }
-  CONTRACT { uuid id PK uuid project_id FK string status }
-  MILESTONE { uuid id PK uuid contract_id FK string title datetime due_date }
-  DELIVERABLE { uuid id PK uuid milestone_id FK string url string status }`;
-  }
-
-  return `erDiagram
-  USER ||--o{ PROJECT : cree
-  PROJECT ||--o{ REQUIREMENT : contient
-  PROJECT ||--o{ FEATURE : definit
-  FEATURE ||--o{ TASK : decoupe
-  PROJECT ||--o{ DELIVERABLE : produit
-  PROJECT ||--o{ DECISION : trace
-
-  USER { uuid id PK string email string role }
-  PROJECT { uuid id PK string title string status datetime created_at }
-  REQUIREMENT { uuid id PK uuid project_id FK text description string priority }
-  FEATURE { uuid id PK uuid project_id FK string name string status }
-  TASK { uuid id PK uuid feature_id FK string title string status }
-  DELIVERABLE { uuid id PK uuid project_id FK string type text content }
-  DECISION { uuid id PK uuid project_id FK text summary datetime decided_at }`;
 }
 
 function stripMermaidBlocks(content: string = ''): string {
@@ -283,7 +161,7 @@ function buildRoundDeliverables(project: any) {
   return { round1, round2, round3 };
 }
 
-function MermaidDiagram({ chart }: { chart: string }) {
+function MermaidDiagram({ chart, emptyMessage = "Aucun diagramme Mermaid spécifique à ce projet n'a été généré pour cette ronde." }: { chart: string; emptyMessage?: string }) {
   const [svg, setSvg] = useState('');
   const [error, setError] = useState('');
   const chartIdRef = useRef(`mermaid-${Math.random().toString(36).slice(2)}`);
@@ -333,7 +211,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
   if (!chart.trim()) {
     return (
       <div className="rounded-2xl border border-dashed border-border bg-muted/20 p-8 text-center text-sm text-muted-foreground">
-        Aucun bloc Mermaid `erDiagram` détecté dans le MCD.
+        {emptyMessage}
       </div>
     );
   }
@@ -511,7 +389,20 @@ export default function ProjectDashboard() {
     if (!content) return;
     setSendingMessage(true);
     try {
-      await api.projects.sendMessage(projectId, content);
+      const result = await api.projects.sendMessage(projectId, content);
+      if (result?.restart_triggered) {
+        setWsStatus('running');
+        setLogs((prev) => [...prev, {
+          text: 'Demande de correction reçue. Une nouvelle passe corrective a été relancée automatiquement depuis les checkpoints déjà produits.',
+          type: 'system',
+        }]);
+        startStreaming();
+      } else {
+        setLogs((prev) => [...prev, {
+          text: 'Message ajouté au contexte du projet. Les employés l’utiliseront lors de la prochaine étape utile.',
+          type: 'info',
+        }]);
+      }
       setChatInput('');
     } catch (err: any) {
       setLogs((prev) => [...prev, { text: err.message || 'Impossible d’envoyer le message.', type: 'error' }]);
@@ -850,8 +741,9 @@ export default function ProjectDashboard() {
     }
   };
 
-  if (loading) return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
+  if (loading) return <AuthGuard><div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div></AuthGuard>;
   if (error || !project) return (
+    <AuthGuard>
     <div className="min-h-screen flex items-center justify-center p-6">
       <Card className="max-w-md border-destructive/20">
         <CardHeader><CardTitle className="text-destructive">Erreur</CardTitle></CardHeader>
@@ -861,6 +753,7 @@ export default function ProjectDashboard() {
         </CardContent>
       </Card>
     </div>
+    </AuthGuard>
   );
 
   const deliverables = project.final_deliverables || {};
@@ -899,8 +792,10 @@ export default function ProjectDashboard() {
   const selectedDeliverableContent = String(selectedRoundDeliverables?.[activeDeliverable] || '*Livrable non généré pour cette ronde.*');
   const mcdSource = String(selectedRoundDeliverables?.mcd || deliverables.mcd || project.engineering_r1 || '');
   const extractedMcdMermaid = extractMermaidDiagram(mcdSource);
-  const fallbackMcdMermaid = buildFallbackErDiagram(mcdSource, project.input_text || '');
-  const mcdMermaid = looksUsableMermaidErDiagram(extractedMcdMermaid) ? extractedMcdMermaid : fallbackMcdMermaid;
+  const mcdMermaid = looksUsableMermaidErDiagram(extractedMcdMermaid) ? extractedMcdMermaid : '';
+  const mcdMermaidEmptyMessage = mcdSource.trim()
+    ? "Aucun diagramme Mermaid spécifique à ce projet n'a été généré pour cette ronde. Le MCD textuel reste affiché ci-dessous."
+    : "Aucun MCD n'a été généré pour cette ronde.";
   const hasRound1 = Boolean(project.strategy_r1 || project.ux_r1 || project.engineering_r1 || project.devops_r1);
   const round1Complete = Boolean(project.strategy_r1 && project.ux_r1 && project.engineering_r1 && project.devops_r1);
   const critiques = project.critiques || {};
@@ -950,7 +845,7 @@ export default function ProjectDashboard() {
               </div>
               <div className="rounded-xl border border-primary/15 bg-primary/5 p-4 text-xs text-muted-foreground leading-relaxed">
                 <Sparkles className="h-4 w-4 text-primary mb-2" />
-                Les messages envoyés dans le chat sont ajoutés au contexte réel des prochains rounds.
+                Les messages envoyés dans le chat sont ajoutés au contexte réel des prochains rounds. Après livraison, une demande peut aussi relancer une passe corrective.
               </div>
             </CardContent>
           </Card>
@@ -1106,7 +1001,7 @@ export default function ProjectDashboard() {
                     <span className={cn('h-2 w-2 rounded-full', item.value ? 'bg-emerald-500' : 'bg-muted-foreground/30')} />
                   </div>
                   <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-4">
-                    {item.value ? String(item.value).replace(/[#*_`>-]/g, '').slice(0, 260) : 'En attente de génération...'}
+                    {item.value ? String(item.value).replace(CLEAN_MD_REGEX, '').slice(0, 260) : 'En attente de génération...'}
                   </p>
                 </div>
               ))}
@@ -1313,7 +1208,7 @@ export default function ProjectDashboard() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <MermaidDiagram chart={mcdMermaid} />
+                    <MermaidDiagram chart={mcdMermaid} emptyMessage={mcdMermaidEmptyMessage} />
                   </CardContent>
                 </Card>
               )}
@@ -1336,8 +1231,9 @@ export default function ProjectDashboard() {
   }
 
   return (
-    <div className="contents">
-      <motion.div
+    <AuthGuard>
+      <div className="contents">
+        <motion.div
         className="flex flex-col min-h-screen origin-left"
         animate={{ scale: deliverablesPanelOpen ? 0.985 : 1, x: deliverablesPanelOpen ? -18 : 0 }}
         transition={{ type: 'spring', stiffness: 260, damping: 28 }}
@@ -1592,7 +1488,7 @@ export default function ProjectDashboard() {
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <MermaidDiagram chart={mcdMermaid} />
+                      <MermaidDiagram chart={mcdMermaid} emptyMessage={mcdMermaidEmptyMessage} />
                     </CardContent>
                   </Card>
                 )}
@@ -1624,6 +1520,7 @@ export default function ProjectDashboard() {
         )}
       </AnimatePresence>
     </div>
+    </AuthGuard>
   );
 
 }

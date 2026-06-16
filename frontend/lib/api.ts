@@ -253,7 +253,7 @@ export const api = {
     async getWorkflowSettings() {
       return request('/admin/workflow-settings');
     },
-    async updateWorkflowSettings(data: { debate_rounds: number; llm_timeout_seconds: number }) {
+    async updateWorkflowSettings(data: { debate_rounds: number; llm_timeout_seconds: number; final_json_retry_count: number }) {
       return request('/admin/workflow-settings', {
         method: 'PUT',
         body: JSON.stringify(data),

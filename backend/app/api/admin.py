@@ -105,6 +105,7 @@ class AgencyDepartmentsIn(BaseModel):
 class WorkflowSettingsIn(BaseModel):
     debate_rounds: int = 1
     llm_timeout_seconds: int = 180
+    final_json_retry_count: int = 2
 
 
 class WorkflowSettingsOut(BaseModel):
@@ -113,6 +114,9 @@ class WorkflowSettingsOut(BaseModel):
     llm_timeout_seconds: int = 180
     min_timeout_seconds: int = 30
     max_timeout_seconds: int = 900
+    final_json_retry_count: int = 2
+    min_final_json_retry_count: int = 0
+    max_final_json_retry_count: int = 5
 
 
 class GenerationSettingsIn(BaseModel):
@@ -127,6 +131,7 @@ class GenerationSettingsOut(BaseModel):
 
 WORKFLOW_DEBATE_ROUNDS_KEY = "workflow_debate_rounds"
 WORKFLOW_LLM_TIMEOUT_KEY = "workflow_llm_timeout_seconds"
+WORKFLOW_FINAL_JSON_RETRY_KEY = "workflow_final_json_retry_count"
 QWEN_CONFIG_DIR = Path(os.environ.get("QWEN_CONFIG_DIR") or Path.home() / ".qwen")
 QWEN_SETTINGS_FILE = QWEN_CONFIG_DIR / "settings.json"
 
@@ -147,6 +152,14 @@ def clamp_llm_timeout_seconds(value: int | str | None) -> int:
     return max(30, min(parsed, 900))
 
 
+def clamp_final_json_retry_count(value: int | str | None) -> int:
+    try:
+        parsed = int(value or 2)
+    except (TypeError, ValueError):
+        parsed = 2
+    return max(0, min(parsed, 5))
+
+
 # ──────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────
@@ -157,12 +170,17 @@ async def get_workflow_settings(
     _: object = Depends(get_current_admin),
 ):
     result = await db.execute(
-        select(LLMConfig).where(LLMConfig.provider.in_([WORKFLOW_DEBATE_ROUNDS_KEY, WORKFLOW_LLM_TIMEOUT_KEY]))
+        select(LLMConfig).where(LLMConfig.provider.in_([
+            WORKFLOW_DEBATE_ROUNDS_KEY,
+            WORKFLOW_LLM_TIMEOUT_KEY,
+            WORKFLOW_FINAL_JSON_RETRY_KEY,
+        ]))
     )
     configs = {cfg.provider: cfg for cfg in result.scalars().all()}
     return WorkflowSettingsOut(
         debate_rounds=clamp_debate_rounds(configs.get(WORKFLOW_DEBATE_ROUNDS_KEY).value if configs.get(WORKFLOW_DEBATE_ROUNDS_KEY) else None),
         llm_timeout_seconds=clamp_llm_timeout_seconds(configs.get(WORKFLOW_LLM_TIMEOUT_KEY).value if configs.get(WORKFLOW_LLM_TIMEOUT_KEY) else None),
+        final_json_retry_count=clamp_final_json_retry_count(configs.get(WORKFLOW_FINAL_JSON_RETRY_KEY).value if configs.get(WORKFLOW_FINAL_JSON_RETRY_KEY) else None),
     )
 
 
@@ -174,9 +192,14 @@ async def update_workflow_settings(
 ):
     debate_rounds = clamp_debate_rounds(body.debate_rounds)
     llm_timeout_seconds = clamp_llm_timeout_seconds(body.llm_timeout_seconds)
+    final_json_retry_count = clamp_final_json_retry_count(body.final_json_retry_count)
 
     result = await db.execute(
-        select(LLMConfig).where(LLMConfig.provider.in_([WORKFLOW_DEBATE_ROUNDS_KEY, WORKFLOW_LLM_TIMEOUT_KEY]))
+        select(LLMConfig).where(LLMConfig.provider.in_([
+            WORKFLOW_DEBATE_ROUNDS_KEY,
+            WORKFLOW_LLM_TIMEOUT_KEY,
+            WORKFLOW_FINAL_JSON_RETRY_KEY,
+        ]))
     )
     configs = {cfg.provider: cfg for cfg in result.scalars().all()}
 
@@ -194,10 +217,18 @@ async def update_workflow_settings(
     timeout_cfg.value = str(llm_timeout_seconds)
     timeout_cfg.updated_at = datetime.now(timezone.utc)
 
+    json_retry_cfg = configs.get(WORKFLOW_FINAL_JSON_RETRY_KEY)
+    if json_retry_cfg is None:
+        json_retry_cfg = LLMConfig(provider=WORKFLOW_FINAL_JSON_RETRY_KEY)
+        db.add(json_retry_cfg)
+    json_retry_cfg.value = str(final_json_retry_count)
+    json_retry_cfg.updated_at = datetime.now(timezone.utc)
+
     await db.commit()
     return WorkflowSettingsOut(
         debate_rounds=debate_rounds,
         llm_timeout_seconds=llm_timeout_seconds,
+        final_json_retry_count=final_json_retry_count,
     )
 
 

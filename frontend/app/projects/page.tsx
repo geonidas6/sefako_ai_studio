@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { AuthGuard } from '@/components/auth-guard';
 
 type ProjectStatus = 'all' | 'pending' | 'running' | 'paused' | 'completed' | 'failed';
 
@@ -107,6 +108,7 @@ export default function ProjectsPage() {
   ];
 
   return (
+    <AuthGuard>
     <div className="max-w-7xl mx-auto px-6 py-12 md:py-20 space-y-10">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
         <div className="space-y-3">
@@ -255,5 +257,6 @@ export default function ProjectsPage() {
         </div>
       )}
     </div>
+    </AuthGuard>
   );
 }

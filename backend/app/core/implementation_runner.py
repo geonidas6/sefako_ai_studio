@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -10,15 +11,18 @@ from app.core.project_workspace import (
     IMPLEMENTATION_PIPELINE_KEY,
     IMPLEMENTATION_WORKSPACE_KEY,
     WorkspaceSettings,
+    detect_application_stack,
     ensure_pipeline_metadata,
     generate_application_foundation,
     get_workspace_settings,
     initialize_project_workspace,
     set_pipeline_phase,
+    validate_workspace_delivery,
 )
 from app.core.workflow_runner import publish_project_event
 from app.db.database import AsyncSessionLocal
 from app.models.project import Project
+from app.core.llm_router import LLMRouter
 
 ACTIVE_IMPLEMENTATION_TASKS: dict[str, asyncio.Task] = {}
 IMPLEMENTATION_LOCKS: dict[str, asyncio.Lock] = {}
@@ -30,6 +34,9 @@ PHASES = [
     ('backend_foundation', 'Socle backend'),
     ('frontend_foundation', 'Socle frontend'),
     ('docker_packaging', 'Compatibilité docker_manager'),
+    ('requirements_coverage', 'Couverture du CDC'),
+    ('automated_validation', 'Tests et validations'),
+    ('delivery_review', 'Revue de livraison'),
 ]
 
 
@@ -185,7 +192,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
             deliverables = ensure_pipeline_metadata(project.final_deliverables or {}, settings)
             workspace = deliverables.get(IMPLEMENTATION_WORKSPACE_KEY)
             if not isinstance(workspace, dict) or not workspace.get('project_dir'):
-                workspace = initialize_project_workspace(
+                workspace = await initialize_project_workspace(
                     root_path=settings.root_path,
                     project_id=project.id,
                     project_title=project.title,
@@ -195,6 +202,15 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
             pipeline = dict(deliverables.get(IMPLEMENTATION_PIPELINE_KEY) or {})
             project.final_deliverables = deliverables
             await db.commit()
+
+        feature_requests = ''
+        try:
+            request_file = Path(str(workspace['project_dir'])).resolve() / 'docs/feature_requests.md'
+            if request_file.exists():
+                feature_requests = request_file.read_text(encoding='utf-8', errors='ignore')[-6000:]
+        except Exception:
+            feature_requests = ''
+        effective_input_text = input_text + (f"\n\nDemandes applicatives depuis l'IDE:\n{feature_requests}" if feature_requests.strip() else '')
 
         employees = {
             'strategy': {'name': 'Aminata', 'role': 'Lead Growth', 'avatar': 'AG'},
@@ -211,26 +227,60 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
         await _publish_pipeline(project_id, pipeline, 'Conception technique validée. Préparation du repo...')
 
         # Phase 2..5: repo/app generation
-        repo_info = generate_application_foundation(
-            project_dir=workspace['project_dir'],
-            project_id=project_id,
-            project_title=project_title,
-            input_text=input_text,
-            deliverables=deliverables,
-        )
+        stack = detect_application_stack(project_title, effective_input_text, deliverables)
+        backend_label = 'Laravel / PHP' if stack.get('backend') == 'laravel' else 'FastAPI'
+        frontend_label = 'Next.js' if stack.get('frontend') == 'nextjs' else 'frontend statique'
+
+        async with AsyncSessionLocal() as db:
+            llm_router = LLMRouter(db)
+            repo_info = await generate_application_foundation(
+                project_dir=workspace['project_dir'],
+                project_id=project_id,
+                project_title=project_title,
+                input_text=effective_input_text,
+                deliverables=deliverables,
+                llm_router=llm_router,
+            )
         phase_messages = [
             ('repository_scaffold', 'strategy', 'Stratégie', "Je verrouille le périmètre MVP et j'aligne le scaffold repo sur les livrables validés."),
-            ('backend_foundation', 'engineering', 'Ingénierie', "Je structure le backend FastAPI et les premiers points d'entrée API sans sortir du workspace projet."),
-            ('frontend_foundation', 'ux', 'UX', "Je prépare la façade frontend du projet pour matérialiser le produit dès la première itération installable."),
+            ('backend_foundation', 'engineering', 'Ingénierie', f"Je structure le backend {backend_label} et les premiers points d'entrée API sans sortir du workspace projet."),
+            ('frontend_foundation', 'ux', 'UX', f"Je prépare le socle {frontend_label} du projet pour matérialiser le produit dès la première itération installable."),
             ('docker_packaging', 'devops', 'DevOps', "Je finalise les fichiers Docker, Traefik et .env pour rester compatible avec le git deploy de docker_manager."),
         ]
-        for phase_key, agent_key, department, text in phase_messages:
+        for phase_key, agent_key, department, message in phase_messages:
             pipeline = set_pipeline_phase(pipeline, phase_key, 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
             deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-            await _employee_message(project_id, agent_key, department, employees[agent_key], text, phase_key, 'repo projet')
+            await _employee_message(project_id, agent_key, department, employees[agent_key], message, phase_key, 'repo projet')
             await _publish_pipeline(project_id, pipeline, f'{department} travaille sur {phase_key}.')
             pipeline = set_pipeline_phase(pipeline, phase_key, 'completed', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
             deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+
+        pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je relis le CDC et je transforme les exigences en matrice de couverture vérifiable.", 'requirements_coverage', 'docs/requirements_matrix.md')
+        validation = validate_workspace_delivery(
+            project_dir=repo_info['project_dir'],
+            project_id=project_id,
+            project_title=project_title,
+            input_text=effective_input_text,
+            deliverables=deliverables,
+        )
+        repo_info['files'] = validation.get('files') or repo_info['files']
+        pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'completed', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+
+        pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+        await _employee_message(project_id, 'devops', 'DevOps', employees['devops'], "Je lance les contrôles statiques de livraison: Docker, Traefik, .env, healthcheck, garde-fou workspace.", 'automated_validation', 'docs/test_report.md')
+        if not validation.get('success'):
+            raise ValueError('Validation de livraison échouée: ' + ', '.join(validation.get('missing_files') or ['contrôle statique invalide']))
+        pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'completed', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+
+        pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture, validation, manifest et consignes de déploiement.", 'delivery_review', 'docs/delivery_review.md')
+        pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'completed', overall_status='completed', project_dir=repo_info['project_dir'], generated_files=repo_info['files'], last_error=None)
 
         deliverables[IMPLEMENTATION_WORKSPACE_KEY] = {
             **workspace,
@@ -238,16 +288,8 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
             'generated_at': repo_info['generated_at'],
             'repo_name': repo_info['repo_name'],
         }
-        pipeline = set_pipeline_phase(
-            pipeline,
-            'docker_packaging',
-            'completed',
-            overall_status='completed',
-            project_dir=repo_info['project_dir'],
-            generated_files=repo_info['files'],
-            last_error=None,
-        )
         deliverables[IMPLEMENTATION_PIPELINE_KEY] = pipeline
+        deliverables['implementation_validation'] = validation
 
         async with AsyncSessionLocal() as db:
             project = await _load_project(db, project_id)

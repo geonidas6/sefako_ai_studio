@@ -16,6 +16,7 @@ import { api } from '../../lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { AuthGuard } from '@/components/auth-guard';
 
 export default function StudioPage() {
   const router = useRouter();
@@ -85,6 +86,7 @@ export default function StudioPage() {
   };
 
   return (
+    <AuthGuard>
     <div className="max-w-7xl mx-auto px-6 py-12 md:py-20">
       <motion.div 
         initial={{ opacity: 0, x: -20 }}
@@ -242,5 +244,6 @@ export default function StudioPage() {
         </div>
       </div>
     </div>
+    </AuthGuard>
   );
 }

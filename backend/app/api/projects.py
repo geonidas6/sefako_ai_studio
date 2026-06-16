@@ -267,8 +267,55 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
             "phase": "client_input",
             "target": "tous les départements",
         })
+        return {"success": True, "restart_triggered": False}
 
-    return {"success": True}
+    workspace_dir = _get_workspace_dir(project)
+    is_workspace_request = body.author.strip().lower() in {"workspace", "workspace ide", "ide"}
+    if is_workspace_request and workspace_dir:
+        request_file = ensure_within_workspace(workspace_dir, workspace_dir / "docs/feature_requests.md")
+        request_file.parent.mkdir(parents=True, exist_ok=True)
+        existing = request_file.read_text(encoding="utf-8") if request_file.exists() else "# Demandes applicatives\n\n"
+        timestamp = datetime.now(timezone.utc).isoformat()
+        request_file.write_text(existing.rstrip() + f"\n\n## {timestamp}\n\n{content}\n", encoding="utf-8")
+        await publish_project_event(project_id, {
+            "type": "employee_message",
+            "agent": "orchestrator",
+            "department": "Orchestrateur",
+            "employee": {"name": "Sefako Orchestrateur", "role": "Chef de projet IA", "avatar": "SO"},
+            "message": "Demande applicative reçue dans l'IDE. Je l'ajoute au backlog du workspace et je relance les employés si la livraison est au repos.",
+            "phase": "application_request",
+            "target": "docs/feature_requests.md",
+        })
+        if project.status == "completed" and not is_implementation_active(project_id):
+            await start_implementation_pipeline(project_id)
+            return {"success": True, "restart_triggered": False, "implementation_restart_triggered": True}
+        return {"success": True, "restart_triggered": False, "implementation_restart_triggered": False}
+
+    if project.status in {"completed", "failed", "paused"}:
+        deliverables = dict(project.final_deliverables or {})
+        for key in ["cdc", "mcd", "architecture", "roadmap", "notes_synthese", "error"]:
+            deliverables.pop(key, None)
+        project.final_deliverables = deliverables or None
+        project.status = "pending"
+        project.completed_at = None
+        await db.commit()
+        await publish_project_event(project_id, {
+            "type": "employee_message",
+            "agent": "orchestrator",
+            "department": "Orchestrateur",
+            "employee": {"name": "Sefako Orchestrateur", "role": "Chef de projet IA", "avatar": "SO"},
+            "message": "Nouvelle demande reçue après la livraison. Je relance automatiquement une passe de correction à partir des checkpoints existants.",
+            "phase": "client_correction",
+            "target": "tous les départements",
+        })
+        await publish_project_event(project_id, {
+            "type": "implementation_status",
+            "message": "Demande de correction reçue. Reprise automatique des analyses finales depuis les checkpoints.",
+        })
+        await start_project_workflow(project_id, reset=False)
+        return {"success": True, "restart_triggered": True}
+
+    return {"success": True, "restart_triggered": False}
 
 
 @router.post("/{project_id}/start")
@@ -346,7 +393,7 @@ async def start_technical_design(
         raise HTTPException(status_code=409, detail="Validation administrateur requise avant de lancer la phase conception technique.")
 
     deliverables = ensure_pipeline_metadata(dict(project.final_deliverables or {}), settings)
-    workspace_info = initialize_project_workspace(
+    workspace_info = await initialize_project_workspace(
         root_path=settings.root_path,
         project_id=project.id,
         project_title=project.title,

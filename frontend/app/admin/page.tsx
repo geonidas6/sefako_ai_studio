@@ -90,6 +90,9 @@ interface WorkflowSettings {
   llm_timeout_seconds: number;
   min_timeout_seconds: number;
   max_timeout_seconds: number;
+  final_json_retry_count: number;
+  min_final_json_retry_count: number;
+  max_final_json_retry_count: number;
 }
 
 interface GenerationSettings {
@@ -123,7 +126,7 @@ export default function AdminDashboard() {
   const [departments, setDepartments] = useState<DepartmentConfig[]>([]);
   const [savingDepartments, setSavingDepartments] = useState(false);
   const [costs, setCosts] = useState<CostSummary[]>([]);
-  const [workflowSettings, setWorkflowSettings] = useState<WorkflowSettings>({ debate_rounds: 1, max_debate_rounds: 3, llm_timeout_seconds: 180, min_timeout_seconds: 30, max_timeout_seconds: 900 });
+  const [workflowSettings, setWorkflowSettings] = useState<WorkflowSettings>({ debate_rounds: 1, max_debate_rounds: 3, llm_timeout_seconds: 180, min_timeout_seconds: 30, max_timeout_seconds: 900, final_json_retry_count: 2, min_final_json_retry_count: 0, max_final_json_retry_count: 5 });
   const [savingWorkflowSettings, setSavingWorkflowSettings] = useState(false);
   const [generationSettings, setGenerationSettings] = useState<GenerationSettings>({ root_path: '/opt', require_technical_approval: true });
   const [savingGenerationSettings, setSavingGenerationSettings] = useState(false);
@@ -447,6 +450,7 @@ export default function AdminDashboard() {
       const response = await api.admin.updateWorkflowSettings({
         debate_rounds: workflowSettings.debate_rounds,
         llm_timeout_seconds: workflowSettings.llm_timeout_seconds,
+        final_json_retry_count: workflowSettings.final_json_retry_count,
       });
       setWorkflowSettings(response);
       setSuccessMsg('Paramètres du workflow enregistrés.');
@@ -779,7 +783,7 @@ export default function AdminDashboard() {
           <CardDescription>Structure complète du cycle de travail des employés IA.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
             <div className="rounded-xl border border-border/60 bg-background/60 p-4">
               <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Rounds d'analyse initiale</p>
               <p className="mt-3 text-3xl font-bold font-display">1</p>
@@ -824,6 +828,26 @@ export default function AdminDashboard() {
                 <span className="text-xs text-muted-foreground">sec</span>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">Durée maximale d'un appel IA avant coupure automatique et erreur récupérable.</p>
+            </div>
+
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-destructive">Relances auto JSON</p>
+              <div className="mt-3 flex items-center gap-3">
+                <Input
+                  type="number"
+                  min={workflowSettings.min_final_json_retry_count || 0}
+                  max={workflowSettings.max_final_json_retry_count || 5}
+                  value={workflowSettings.final_json_retry_count}
+                  onChange={(event) => {
+                    const parsed = Number.parseInt(event.target.value, 10);
+                    const safe = Number.isFinite(parsed) ? Math.max(workflowSettings.min_final_json_retry_count || 0, Math.min(parsed, workflowSettings.max_final_json_retry_count || 5)) : 2;
+                    setWorkflowSettings({ ...workflowSettings, final_json_retry_count: safe });
+                  }}
+                  className="h-11 max-w-28 font-mono text-lg font-bold"
+                />
+                <span className="text-xs text-muted-foreground">tentatives</span>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">Si la synthèse finale revient avec un JSON cassé, l'orchestrateur relance automatiquement cette étape.</p>
             </div>
 
             <div className="rounded-xl border border-border/60 bg-background/60 p-4">
