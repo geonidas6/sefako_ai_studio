@@ -67,6 +67,7 @@ docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build
 - Backend: FastAPI
 - Base de données: PostgreSQL 16
 - Orchestration IA: LangGraph
+- Panneau de code local: OpenHands (service interne via `OPENHANDS_INTERNAL_URL`, accès navigateur privé via `/openhands`, accès public via `OPENHANDS_PUBLIC_URL` et `OPENHANDS_DOMAIN`)
 
 ## Points d'accès
 
@@ -80,6 +81,7 @@ docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build
 2. Ouvrir la page du projet.
 3. Lancer le workflow multi-agents.
 4. Consulter les analyses Round 1, les critiques Round 2 et les livrables finaux Round 3.
+5. Ouvrir OpenHands pour l'édition locale du workspace et la synchronisation bidirectionnelle des tâches.
 
 ## Remarques
 

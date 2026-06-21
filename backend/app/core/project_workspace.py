@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from app.core.llm_router import LLMRouter
 
 WORKSPACE_ROOT_PATH_KEY = "workspace_root_path"
 WORKSPACE_REQUIRE_APPROVAL_KEY = "workspace_require_technical_approval"
-DEFAULT_WORKSPACE_ROOT = "/opt"
+DEFAULT_WORKSPACE_ROOT = "/projects"
 IMPLEMENTATION_PIPELINE_KEY = "implementation_pipeline"
 IMPLEMENTATION_WORKSPACE_KEY = "implementation_workspace"
 
@@ -134,6 +135,22 @@ def _write_workspace_file(project_dir: Path, relative_path: str, content: str) -
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content)
     return str(target)
+
+
+def _set_workspace_permissions(project_dir: Path) -> None:
+    try:
+        project_dir.chmod(0o775)
+    except Exception:
+        pass
+    for path in project_dir.rglob("*"):
+        try:
+            if path.is_dir():
+                path.chmod(0o775)
+                continue
+            mode = 0o775 if path.suffix == ".sh" or path.name.endswith(".sh") else 0o664
+            path.chmod(mode)
+        except Exception:
+            continue
 
 
 def _phase_status(default: str = "pending") -> list[dict[str, str]]:
@@ -1308,8 +1325,9 @@ async def initialize_project_workspace(
         _write_workspace_file(project_dir, 'docs/implementation_plan.md', _implementation_plan(project_title, input_text, deliverables)),
         _write_workspace_file(project_dir, 'docs/requirements_matrix.md', _requirements_matrix(project_title, input_text, deliverables, stack)),
         _write_workspace_file(project_dir, '.aia/workspace-policy.json', _workspace_policy(str(project_dir.resolve()))),
-        _write_workspace_file(project_dir, 'DEPLOY.md', _deploy_readme(slug, str(project_dir.resolve()))),
     ]
+
+    _set_workspace_permissions(project_dir)
 
     return {
         'project_dir': str(project_dir.resolve()),
@@ -1361,6 +1379,7 @@ async def generate_application_foundation(
     specs.extend(frontend_specs)
     
     files = [_write_workspace_file(base, relative_path, content) for relative_path, content in specs]
+    _set_workspace_permissions(base)
     return {
         'project_dir': str(base),
         'generated_at': utc_now_iso(),

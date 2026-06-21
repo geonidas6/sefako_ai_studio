@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     mistral_api_key: str = ""
     qwen_api_key: str = ""
 
+    # Optional local OpenHands bridge
+    openhands_internal_url: str = ""
+    openhands_agent_server_url: str = "http://openhands:18000"
+    openhands_public_url: str = ""
+
     # CORS
     cors_origins: List[str] = ["http://localhost:3000"]
 

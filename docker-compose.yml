@@ -37,9 +37,13 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
+      OPENHANDS_INTERNAL_URL: ${OPENHANDS_INTERNAL_URL:-http://openhands:8000}
+      OPENHANDS_AGENT_SERVER_URL: ${OPENHANDS_AGENT_SERVER_URL:-http://openhands:18000}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000","https://sefako-ai-studio.it-sefako.com"]}
+      OPENHANDS_PUBLIC_URL: ${OPENHANDS_PUBLIC_URL:-https://open-hand-sefako-ai-studio.it-sefako.com}
       DEBUG: ${DEBUG:-false}
     volumes:
+      - projects_data:/projects
       - qwen_config:/root/.qwen
     expose:
       - "8000"
@@ -53,6 +57,10 @@ services:
       args:
         BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
         NEXT_PUBLIC_API_DOMAIN: ${API_DOMAIN:-api-sefako-ai-studio.it-sefako.com}
+        OPENHANDS_INTERNAL_URL: ${OPENHANDS_INTERNAL_URL:-http://openhands:8000}
+        OPENHANDS_AGENT_SERVER_URL: ${OPENHANDS_AGENT_SERVER_URL:-http://openhands:18000}
+        NEXT_PUBLIC_OPENHANDS_BASE_URL: ${OPENHANDS_BASE_URL:-/openhands}
+        NEXT_PUBLIC_OPENHANDS_PUBLIC_URL: ${OPENHANDS_PUBLIC_URL:-https://open-hand-sefako-ai-studio.it-sefako.com}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
@@ -63,6 +71,10 @@ services:
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
       NEXT_PUBLIC_API_DOMAIN: ${API_DOMAIN:-api-sefako-ai-studio.it-sefako.com}
+      OPENHANDS_INTERNAL_URL: ${OPENHANDS_INTERNAL_URL:-http://openhands:8000}
+      OPENHANDS_AGENT_SERVER_URL: ${OPENHANDS_AGENT_SERVER_URL:-http://openhands:18000}
+      NEXT_PUBLIC_OPENHANDS_BASE_URL: ${OPENHANDS_BASE_URL:-/openhands}
+      NEXT_PUBLIC_OPENHANDS_PUBLIC_URL: ${OPENHANDS_PUBLIC_URL:-https://open-hand-sefako-ai-studio.it-sefako.com}
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: 1
     expose:
@@ -70,6 +82,25 @@ services:
     depends_on:
       - backend
 
+  openhands:
+    image: ghcr.io/openhands/agent-canvas:1.0.0-rc.11
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - projects_data:/projects
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
 volumes:
   postgres_data:
   qwen_config:
+  projects_data:

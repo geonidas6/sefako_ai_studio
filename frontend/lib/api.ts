@@ -145,10 +145,10 @@ export const api = {
 
   projects: {
     async list() {
-      return request('/projects');
+      return request('/projects/');
     },
     async create(title: string, inputText: string) {
-      return request('/projects', {
+      return request('/projects/', {
         method: 'POST',
         body: JSON.stringify({ title, input_text: inputText }),
       });
@@ -229,6 +229,9 @@ export const api = {
     },
     async getWorkspaceHostExportCommand(id: string) {
       return request(`/projects/${id}/workspace/host-export-command`);
+    },
+    async getOpenHandsStatus(id: string) {
+      return request(`/projects/${id}/openhands/status`);
     },
     async delete(id: string) {
       return request(`/projects/${id}`, {

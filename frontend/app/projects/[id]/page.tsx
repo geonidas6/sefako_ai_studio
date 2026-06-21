@@ -24,6 +24,7 @@ import {
   Users,
   Activity,
   Sparkles,
+  PanelLeftOpen,
   PanelRightOpen,
   X,
   GitBranch,
@@ -243,6 +244,7 @@ export default function ProjectDashboard() {
   const [activeDeliverable, setActiveDeliverable] = useState<DeliverableKey>('cdc');
   const [deliverableReviewRound, setDeliverableReviewRound] = useState<ReviewRound>('round3');
   const [deliverablesPanelOpen, setDeliverablesPanelOpen] = useState(false);
+  const [contextPanelOpen, setContextPanelOpen] = useState(false);
   const [isAdminSession, setIsAdminSession] = useState(false);
   const [generationSettings, setGenerationSettings] = useState<GenerationSettings>({ root_path: '/opt', require_technical_approval: true });
   const [startingTechnicalDesign, setStartingTechnicalDesign] = useState(false);
@@ -829,72 +831,8 @@ export default function ProjectDashboard() {
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         exit={{ opacity: 0, y: -10 }}
-        className="grid grid-cols-1 xl:grid-cols-[280px_minmax(0,1fr)_360px] gap-6 xl:items-start"
+        className="grid grid-cols-1 gap-6 xl:grid-cols-1"
       >
-        <div className="space-y-6 xl:h-[calc(100vh-230px)] xl:min-h-[980px] xl:flex xl:flex-col">
-          <Card className="border-border/60 bg-muted/10 xl:shrink-0">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <FileText className="h-4 w-4 text-primary" /> Inputs & données
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="rounded-xl border border-dashed border-border bg-background/60 p-4">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Brief projet</p>
-                <p className="text-xs leading-relaxed text-muted-foreground line-clamp-[10]">{project.input_text}</p>
-              </div>
-              <div className="rounded-xl border border-primary/15 bg-primary/5 p-4 text-xs text-muted-foreground leading-relaxed">
-                <Sparkles className="h-4 w-4 text-primary mb-2" />
-                Les messages envoyés dans le chat sont ajoutés au contexte réel des prochains rounds. Après livraison, une demande peut aussi relancer une passe corrective.
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="xl:min-h-[660px] xl:flex-1 xl:flex xl:flex-col">
-            <CardHeader className="pb-3 xl:shrink-0">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <Users className="h-4 w-4 text-primary" /> Employés actifs
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-3 scrollbar-thin scrollbar-thumb-muted-foreground/20">
-              {employeeRoster.map((employee) => {
-                const active = runningAgents[employee.agent];
-                const status = active ? (agentStatuses[employee.agent] || 'Travaille') : (agentStatuses[employee.agent] || 'Disponible');
-                return (
-                  <div key={`${employee.agent}-${employee.name}`} className="flex items-center gap-3 rounded-xl border border-border/60 bg-muted/25 p-3">
-                    <div
-                      className={cn(
-                        'h-9 w-9 rounded-lg border flex items-center justify-center text-[10px] font-bold shrink-0',
-                        active ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-background text-muted-foreground'
-                      )}
-                    >
-                      {employee.avatar}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-bold truncate">{employee.name}</p>
-                      <p className="text-[10px] text-muted-foreground truncate">{employee.role}</p>
-                    </div>
-                    <span
-                      className={cn(
-                        'text-[9px] rounded-full px-2 py-0.5 border whitespace-nowrap',
-                        active
-                          ? 'border-primary/20 bg-primary/10 text-primary animate-pulse'
-                          : status === 'Terminé'
-                            ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500'
-                            : status === 'Bloqué'
-                              ? 'border-destructive/20 bg-destructive/10 text-destructive'
-                              : 'border-border bg-background text-muted-foreground'
-                      )}
-                    >
-                      {status}
-                    </span>
-                  </div>
-                );
-              })}
-            </CardContent>
-          </Card>
-        </div>
-
         <Card className="border-border/40 shadow-2xl overflow-hidden min-w-0">
           <CardHeader className="border-b border-border/40 py-4 flex flex-row items-center justify-between bg-muted/20">
             <CardTitle className="text-sm flex items-center gap-2">
@@ -985,63 +923,10 @@ export default function ProjectDashboard() {
             </div>
           </CardContent>
         </Card>
-
-        <div className="space-y-6 xl:h-[calc(100vh-230px)] xl:min-h-[980px] xl:flex xl:flex-col">
-          <Card className="xl:shrink-0">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <Activity className="h-4 w-4 text-primary" /> Livrables vivants
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {liveDeliverableCards.map((item) => (
-                <div key={item.key} className="rounded-xl border border-border/60 bg-muted/20 p-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold">{item.label}</span>
-                    <span className={cn('h-2 w-2 rounded-full', item.value ? 'bg-emerald-500' : 'bg-muted-foreground/30')} />
-                  </div>
-                  <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-4">
-                    {item.value ? String(item.value).replace(CLEAN_MD_REGEX, '').slice(0, 260) : 'En attente de génération...'}
-                  </p>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-
-          <Card className="bg-black border-border/40 xl:h-[420px] xl:flex-none xl:flex xl:flex-col">
-            <CardHeader className="py-3 xl:shrink-0">
-              <CardTitle className="text-xs font-mono text-muted-foreground flex items-center gap-2 uppercase tracking-widest">
-                <Terminal className="h-3.5 w-3.5" /> Logs système
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="xl:min-h-0 xl:flex-1">
-              <div className="h-[360px] xl:h-full overflow-y-auto font-mono text-[10px] leading-relaxed scrollbar-thin scrollbar-thumb-muted-foreground/20">
-                {logs.map((log, i) => (
-                  <div
-                    key={i}
-                    className={cn(
-                      'mb-1.5 flex gap-2',
-                      log.type === 'error'
-                        ? 'text-destructive'
-                        : log.type === 'success'
-                          ? 'text-emerald-500'
-                          : log.type === 'system'
-                            ? 'text-primary'
-                            : 'text-zinc-400'
-                    )}
-                  >
-                    <span className="opacity-30 shrink-0">[{new Date().toLocaleTimeString()}]</span>
-                    <span>{log.text}</span>
-                  </div>
-                ))}
-                {logs.length === 0 && <div className="text-muted-foreground/30 italic">Attente d'instructions...</div>}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
       </motion.div>
     );
   } else if (activeTab === 'r1' || activeTab === 'r2') {
+
     tabContent = (
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {[
@@ -1141,7 +1026,7 @@ export default function ProjectDashboard() {
                     <>
                       <Button asChild type="button" variant="outline" size="sm" className="gap-2">
                         <Link href={`/projects/${projectId}/workspace`}>
-                          <FolderTree className="h-3.5 w-3.5" /> Ouvrir l'IDE applicatif
+                          <FolderTree className="h-3.5 w-3.5" /> Ouvrir OpenHands
                         </Link>
                       </Button>
                       <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadWorkspace}>
@@ -1287,7 +1172,7 @@ export default function ProjectDashboard() {
                       <Button asChild variant="outline" className="gap-2">
                         <Link href={`/projects/${projectId}/workspace`}>
                           <FolderTree className="h-4 w-4" />
-                          Ouvrir l'IDE applicatif
+                          Ouvrir OpenHands
                         </Link>
                       </Button>
                     )}
@@ -1395,6 +1280,130 @@ export default function ProjectDashboard() {
           </div>
         </main>
       </motion.div>
+
+      <button
+        onClick={() => setContextPanelOpen(true)}
+        className={cn(
+          'fixed left-0 top-1/2 z-40 -translate-y-1/2 rounded-r-2xl border border-l-0 border-primary/30 bg-primary text-primary-foreground shadow-2xl shadow-primary/20 transition-transform hover:translate-x-1',
+          contextPanelOpen && '-translate-x-full'
+        )}
+        title="Ouvrir le contexte du projet"
+      >
+        <span className="flex items-center gap-2 px-3 py-4 [writing-mode:vertical-rl]">
+          <span className="text-xs font-bold uppercase tracking-widest">Contexte</span>
+          <PanelLeftOpen className="h-4 w-4 rotate-90" />
+        </span>
+      </button>
+
+      <AnimatePresence>
+        {contextPanelOpen && (
+          <>
+            <motion.div
+              className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px] xl:hidden"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setContextPanelOpen(false)}
+            />
+            <motion.aside
+              initial={{ x: -760, opacity: 0, scale: 0.96 }}
+              animate={{ x: 0, opacity: 1, scale: 1 }}
+              exit={{ x: -760, opacity: 0, scale: 0.96 }}
+              transition={{ type: 'spring', stiffness: 260, damping: 30 }}
+              className="fixed bottom-0 left-0 top-0 z-50 flex w-full max-w-[520px] flex-col border-r border-border bg-background/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
+            >
+              <div className="flex items-center justify-between border-b border-border/60 p-5">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-primary">Projet live</p>
+                  <h2 className="mt-1 text-xl font-bold">Contexte OpenHands</h2>
+                </div>
+                <Button variant="ghost" size="icon" onClick={() => setContextPanelOpen(false)}>
+                  <X className="h-5 w-5" />
+                </Button>
+              </div>
+
+              <div className="grid min-h-0 flex-1 grid-rows-[1fr_1.15fr] gap-4 overflow-hidden p-4">
+                <Card className="flex min-h-0 flex-col overflow-hidden border-border/60 bg-muted/20">
+                  <CardHeader className="shrink-0 pb-3">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <FileText className="h-4 w-4 text-primary" />
+                      Inputs & données
+                    </CardTitle>
+                    <CardDescription>
+                      Le brief initial et le contexte projet transmis à OpenHands.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-3">
+                    <div className="rounded-xl border border-dashed border-border bg-background/60 p-4">
+                      <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Brief projet</p>
+                      <p className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">{project.input_text}</p>
+                    </div>
+                    <div className="rounded-xl border border-primary/15 bg-primary/5 p-4 text-xs leading-relaxed text-muted-foreground">
+                      <Sparkles className="mb-2 h-4 w-4 text-primary" />
+                      Les messages envoyés depuis cette page sont injectés dans le contexte réel du projet et peuvent relancer OpenHands.
+                    </div>
+                    {workspaceInfo && (
+                      <div className="space-y-2 rounded-xl border border-border/60 bg-background/60 p-4 text-xs text-muted-foreground">
+                        <p><strong>Dossier :</strong> <code>{workspaceInfo.project_dir}</code></p>
+                        <p><strong>Racine :</strong> <code>{workspaceInfo.root_path}</code></p>
+                        <p><strong>Fichiers :</strong> {Array.isArray(workspaceInfo.files) ? workspaceInfo.files.length : 0}</p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="flex min-h-0 flex-col overflow-hidden border-border/60 bg-muted/20">
+                  <CardHeader className="shrink-0 pb-3">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Users className="h-4 w-4 text-primary" />
+                      Employés actifs
+                    </CardTitle>
+                    <CardDescription>
+                      Les rôles qui participent au flux de travail du projet.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-3">
+                    {employeeRoster.map((employee) => {
+                      const active = runningAgents[employee.agent];
+                      const status = active ? (agentStatuses[employee.agent] || 'Travaille') : (agentStatuses[employee.agent] || 'Disponible');
+                      return (
+                        <div key={`${employee.agent}-${employee.name}`} className="flex items-center gap-3 rounded-xl border border-border/60 bg-background/60 p-3">
+                          <div
+                            className={cn(
+                              'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border text-[10px] font-bold',
+                              active ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-background text-muted-foreground'
+                            )}
+                          >
+                            {employee.avatar}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-xs font-bold">{employee.name}</p>
+                            <p className="truncate text-[10px] text-muted-foreground">{employee.role}</p>
+                          </div>
+                          <span
+                            className={cn(
+                              'whitespace-nowrap rounded-full border px-2 py-0.5 text-[9px]',
+                              active
+                                ? 'border-primary/20 bg-primary/10 text-primary'
+                                : status === 'Terminé'
+                                  ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500'
+                                  : status === 'Bloqué'
+                                    ? 'border-destructive/20 bg-destructive/10 text-destructive'
+                                    : 'border-border bg-background text-muted-foreground'
+                            )}
+                          >
+                            {status}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </CardContent>
+                </Card>
+              </div>
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
 
       <button
         onClick={() => setDeliverablesPanelOpen(true)}

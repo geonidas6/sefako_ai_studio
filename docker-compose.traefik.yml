@@ -8,8 +8,9 @@ services:
       traefik.http.services.sefako-ai-studio-backend.loadbalancer.server.port: '8000'
       traefik.docker.network: proxy_net
     networks:
-    - default
-    - proxy_net
+      - default
+      - proxy_net
+
   frontend:
     labels:
       traefik.enable: 'true'
@@ -19,7 +20,19 @@ services:
       traefik.http.services.sefako-ai-studio-frontend.loadbalancer.server.port: '3000'
       traefik.docker.network: proxy_net
     networks:
-    - proxy_net
+      - proxy_net
+
+  openhands:
+    labels:
+      traefik.enable: 'true'
+      traefik.http.routers.sefako-ai-studio-openhands.rule: Host(`open-hand-sefako-ai-studio.it-sefako.com`)
+      traefik.http.routers.sefako-ai-studio-openhands.entrypoints: websecure
+      traefik.http.routers.sefako-ai-studio-openhands.tls.certresolver: myresolver
+      traefik.http.services.sefako-ai-studio-openhands.loadbalancer.server.port: '8000'
+      traefik.docker.network: proxy_net
+    networks:
+      - proxy_net
+
 networks:
   proxy_net:
     external: true

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import shutil
 import uuid
@@ -5,12 +6,17 @@ import zipfile
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.error import URLError
+from urllib.parse import urljoin
+from urllib.request import urlopen
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, delete
 from pydantic import BaseModel
 
+from app.core.config import settings
 from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, IMPLEMENTATION_WORKSPACE_KEY, ensure_pipeline_metadata, ensure_within_workspace, get_workspace_settings, initialize_project_workspace, set_pipeline_phase
+from app.core.openhands_bridge import ensure_project_conversation, run_openhands_task
 from app.core.security import get_current_admin
 from app.db.database import get_db
 from app.models.project import Project
@@ -134,6 +140,22 @@ def _workspace_tree(project_dir: Path) -> list[dict[str, object]]:
         })
     return items
 
+
+
+def _normalize_base_url(base_url: str | None) -> str | None:
+    candidate = (base_url or '').strip().rstrip('/')
+    return candidate or None
+
+
+def _probe_url(url: str, timeout: float = 2.0) -> bool:
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            return 200 <= getattr(response, 'status', 200) < 400
+    except URLError:
+        return False
+    except Exception:
+        return False
+
 class ProjectCreateIn(BaseModel):
     title: str
     input_text: str
@@ -190,6 +212,18 @@ class WorkspaceHostExportCommandOut(BaseModel):
     command: str
 
 
+class OpenHandsStatusOut(BaseModel):
+    enabled: bool
+    base_url: str | None = None
+    alive: bool = False
+    health: bool = False
+    ready: bool = False
+    workspace_dir: str | None = None
+    conversation_id: str | None = None
+    suggested_url: str | None = None
+    embed_url: str | None = None
+    notes: list[str] = []
+
 def project_to_dict(p: Project) -> ProjectOut:
     return ProjectOut(
         id=p.id,
@@ -207,6 +241,7 @@ def project_to_dict(p: Project) -> ProjectOut:
     )
 
 
+@router.get("", response_model=list[ProjectOut])
 @router.get("/", response_model=list[ProjectOut])
 async def list_projects(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -215,6 +250,7 @@ async def list_projects(db: AsyncSession = Depends(get_db)):
     return [project_to_dict(p) for p in result.scalars().all()]
 
 
+@router.post("")
 @router.post("/", response_model=ProjectOut)
 async def create_project(body: ProjectCreateIn, db: AsyncSession = Depends(get_db)):
     project = Project(
@@ -270,11 +306,11 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
         return {"success": True, "restart_triggered": False}
 
     workspace_dir = _get_workspace_dir(project)
-    is_workspace_request = body.author.strip().lower() in {"workspace", "workspace ide", "ide"}
-    if is_workspace_request and workspace_dir:
+    is_openhands_request = body.author.strip().lower() in {"workspace", "workspace ide", "ide", "openhands"}
+    if is_openhands_request and workspace_dir:
         request_file = ensure_within_workspace(workspace_dir, workspace_dir / "docs/feature_requests.md")
         request_file.parent.mkdir(parents=True, exist_ok=True)
-        existing = request_file.read_text(encoding="utf-8") if request_file.exists() else "# Demandes applicatives\n\n"
+        existing = request_file.read_text(encoding="utf-8") if request_file.exists() else "# Demandes OpenHands\n\n"
         timestamp = datetime.now(timezone.utc).isoformat()
         request_file.write_text(existing.rstrip() + f"\n\n## {timestamp}\n\n{content}\n", encoding="utf-8")
         await publish_project_event(project_id, {
@@ -282,12 +318,22 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
             "agent": "orchestrator",
             "department": "Orchestrateur",
             "employee": {"name": "Sefako Orchestrateur", "role": "Chef de projet IA", "avatar": "SO"},
-            "message": "Demande applicative reçue dans l'IDE. Je l'ajoute au backlog du workspace et je relance les employés si la livraison est au repos.",
+            "message": "Brief OpenHands reçu. Je le range dans le contexte du projet et je prépare l'exécution locale.",
             "phase": "application_request",
             "target": "docs/feature_requests.md",
         })
-        if project.status == "completed" and not is_implementation_active(project_id):
-            await start_implementation_pipeline(project_id)
+        if project.status == "completed":
+            async def _run_task() -> None:
+                try:
+                    await run_openhands_task(project_id, project.title, workspace_dir, content)
+                except Exception as exc:
+                    await publish_project_event(project_id, {
+                        "type": "implementation_error",
+                        "message": "OpenHands n'a pas pu exécuter la tâche.",
+                        "error": str(exc),
+                    })
+
+            asyncio.create_task(_run_task())
             return {"success": True, "restart_triggered": False, "implementation_restart_triggered": True}
         return {"success": True, "restart_triggered": False, "implementation_restart_triggered": False}
 
@@ -776,6 +822,70 @@ async def get_project_workspace_host_export_command(
         repo_name=repo_name,
         destination=destination,
         command=command,
+    )
+
+
+@router.get("/{project_id}/openhands/status", response_model=OpenHandsStatusOut)
+async def get_project_openhands_status(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    project_dir = _get_workspace_dir(project)
+    base_url = _normalize_base_url(getattr(settings, "openhands_internal_url", None) or getattr(settings, "openhands_base_url", None))
+    if not base_url:
+        return OpenHandsStatusOut(
+            enabled=False,
+            workspace_dir=str(project_dir) if project_dir else None,
+            notes=["Renseigne OPENHANDS_INTERNAL_URL pour connecter OpenHands local."],
+        )
+
+    alive = _probe_url(urljoin(base_url + '/', 'alive'))
+    health = _probe_url(urljoin(base_url + '/', 'health'))
+    ready = _probe_url(urljoin(base_url + '/', 'ready'))
+    notes = [
+        'OpenHands est configuré en local.',
+        'Si l’interface n’embarque pas dans un iframe, ouvre-la dans un nouvel onglet.',
+    ]
+    conversation_id = None
+    suggested_url = None
+    embed_url = None
+
+    if project_dir and project_dir.exists():
+        try:
+            conversation = await ensure_project_conversation(project_id, project.title, project_dir, project.input_text, project.final_deliverables)
+            conversation_id = conversation.get('conversation_id')
+            suggested_url = conversation.get('suggested_url')
+            embed_url = conversation.get('embed_url')
+            notes.extend(conversation.get('notes') or [])
+        except Exception as exc:
+            notes.append(f"Impossible d\'initialiser la conversation OpenHands: {exc}")
+
+    if project_dir:
+        notes.append(f'Workspace projet: {project_dir}')
+
+    public_base = _normalize_base_url(getattr(settings, "openhands_public_url", None) or getattr(settings, "openhands_base_url", None) or base_url)
+    if not suggested_url and public_base:
+        suggested_url = f'{public_base.rstrip("/")}/conversations/{project_id}'
+    if not embed_url:
+        embed_url = suggested_url
+
+    return OpenHandsStatusOut(
+        enabled=True,
+        base_url=base_url,
+        alive=alive,
+        health=health,
+        ready=ready,
+        workspace_dir=str(project_dir) if project_dir else None,
+        conversation_id=conversation_id or project_id,
+        suggested_url=suggested_url,
+        embed_url=embed_url,
+        notes=notes,
     )
 
 
