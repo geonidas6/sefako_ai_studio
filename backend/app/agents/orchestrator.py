@@ -487,7 +487,7 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
                 )
                 await persist_project_field(state["project_id"], fields[agent_key], result)
                 await emit("agent_complete", agent=agent_key, round=1, preview=result[:200], content=result)
-                await speak(agent_key, "lead", f"Analyse initiale prête : {excerpt(result)}", 1, "result")
+                await speak(agent_key, "lead", f"Analyse initiale prête :\n\n{result}", 1, "result")
                 await speak(agent_key, "reviewer", "Je transmets cette proposition aux autres départements pour critique contradictoire.", 1, "system_step")
                 return result
             except Exception as e:
@@ -567,7 +567,7 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
                     )
                     await persist_project_critique(state["project_id"], agent_key, result)
                     await emit("agent_complete", agent=agent_key, round=round_number, preview=result[:150], content=result)
-                    await speak(agent_key, "lead", f"Critique formulée : {excerpt(result)}", round_number, "critique_result", target="orchestrateur")
+                    await speak(agent_key, "lead", f"Critique formulée :\n\n{result}", round_number, "critique_result", target="orchestrateur")
                     return result
                 except Exception as e:
                     await emit("agent_error", agent=agent_key, round=round_number, error=str(e))

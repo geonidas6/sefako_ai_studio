@@ -23,10 +23,8 @@ IMPLEMENTATION_WORKSPACE_KEY = "implementation_workspace"
 PIPELINE_PHASES = [
     ("admin_approval", "Validation admin"),
     ("technical_design", "Conception technique"),
-    ("repository_scaffold", "Scaffold du repo"),
-    ("backend_foundation", "Socle backend"),
-    ("frontend_foundation", "Socle frontend"),
-    ("docker_packaging", "Compatibilité docker_manager"),
+    ("documentation_pack", "Pack documentaire"),
+    ("openhands_bootstrap", "Handoff OpenHands"),
     ("requirements_coverage", "Couverture du CDC"),
     ("automated_validation", "Tests et validations"),
     ("delivery_review", "Revue de livraison"),
@@ -306,6 +304,7 @@ def detect_application_stack(project_title: str, input_text: str, deliverables: 
         ("angular", [r"\bangular\b"]),
         ("vue", [r"\bvue\b", r"\bvuejs\b", r"\bvite\b.*\bvue\b"]),
         ("react", [r"\breact\b", r"\breactjs\b", r"\bvite\b.*\breact\b"]),
+        ("blade", [r"\bblade\b", r"laravel blade", r"\blaravel views?\b"]),
         ("flutter_web", [r"flutter web"]),
         ("static", [r"\bhtml\b", r"\bcss\b", r"\bjavascript\b", r"\bvanilla js\b"]),
     ]
@@ -378,6 +377,7 @@ def detect_application_stack(project_title: str, input_text: str, deliverables: 
         "sveltekit": "static",
         "angular": "static",
         "flutter_web": "static",
+        "blade": "monolith",
         "static": "static",
     }
 
@@ -398,6 +398,30 @@ def detect_application_stack(project_title: str, input_text: str, deliverables: 
 
 def _project_env_template(slug: str, stack: dict[str, str]) -> str:
     frontend_port = "3000" if stack.get("generation_frontend") == "nextjs" else "80"
+    if stack.get("generation_frontend") == "monolith":
+        return f"""APP_NAME={slug}
+APP_ENV=local
+APP_KEY=change-me
+APP_DEBUG=true
+APP_URL=https://{slug}.example.com
+DB_CONNECTION=sqlite
+DB_DATABASE=database/database.sqlite
+STACK_BACKEND={stack.get('backend', 'laravel')}
+STACK_FRONTEND={stack.get('frontend', 'blade')}
+STACK_LAYOUT=monolith
+"""
+    if stack.get('database') == 'sqlite':
+        return f"""APP_NAME={slug}
+APP_ENV=local
+APP_KEY=change-me
+APP_DEBUG=true
+APP_URL=https://{slug}.example.com
+DB_CONNECTION=sqlite
+DB_DATABASE=database/database.sqlite
+FRONTEND_PORT={frontend_port}
+STACK_BACKEND={stack.get('backend', 'fastapi')}
+STACK_FRONTEND={stack.get('frontend', 'static')}
+"""
     return f"""APP_NAME={slug}
 FRONTEND_DOMAIN={slug}.example.com
 API_DOMAIN=api-{slug}.example.com
@@ -414,6 +438,42 @@ STACK_FRONTEND={stack.get('frontend', 'static')}
 
 def _project_compose_template(slug: str, stack: dict[str, str]) -> str:
     frontend_port = "3000" if stack.get("generation_frontend") == "nextjs" else "80"
+    if stack.get("generation_frontend") == "monolith":
+        return f"""services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    expose:
+      - "8000"
+    restart: unless-stopped
+"""
+    if stack.get('database') == 'sqlite':
+        return f"""services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    expose:
+      - "{frontend_port}"
+    restart: unless-stopped
+"""
     return f"""services:
   backend:
     build:
@@ -456,6 +516,23 @@ volumes:
 
 def _project_traefik_template(slug: str, stack: dict[str, str]) -> str:
     frontend_port = "3000" if stack.get("generation_frontend") == "nextjs" else "80"
+    if stack.get("generation_frontend") == "monolith":
+        return f"""services:
+  app:
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy_net
+      - traefik.http.routers.{slug}-app.rule=Host(`${{FRONTEND_DOMAIN}}`)
+      - traefik.http.routers.{slug}-app.entrypoints=websecure
+      - traefik.http.routers.{slug}-app.tls.certresolver=myresolver
+      - traefik.http.services.{slug}-app.loadbalancer.server.port=8000
+    networks:
+      - proxy_net
+
+networks:
+  proxy_net:
+    external: true
+"""
     return f"""services:
   backend:
     labels:
@@ -707,6 +784,251 @@ JSON;
 }}
 """
 
+
+def _laravel_monolith_routes_web() -> str:
+    return """<?php
+
+use Illuminate\Support\Facades\Route;
+
+Route::get('/', function () {
+    return view('home');
+});
+
+Route::get('/health', function () {
+    return response()->json(['status' => 'ok']);
+});
+"""
+
+
+def _laravel_home_blade(project_title: str, deliverables: dict[str, Any]) -> str:
+    safe_title = project_title.replace("<", "").replace(">", "")
+    summary = json.dumps({
+        'title': project_title,
+        'cdc': str(deliverables.get('cdc') or '')[:1200],
+        'architecture': str(deliverables.get('architecture') or '')[:1200],
+        'roadmap': str(deliverables.get('roadmap') or '')[:1200],
+    }, ensure_ascii=False, indent=2)
+    return f"""<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{safe_title}</title>
+    <style>
+      :root {{ color-scheme: dark; }}
+      body {{ margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #1b1235, #090a0f 55%); color: #f5f7fb; }}
+      .shell {{ max-width: 960px; margin: 0 auto; padding: 64px 24px; }}
+      .eyebrow {{ letter-spacing: .24em; text-transform: uppercase; font-size: 12px; color: #a78bfa; }}
+      h1 {{ font-size: clamp(2rem, 4vw, 3.5rem); margin-bottom: 16px; }}
+      .card {{ margin-top: 24px; padding: 24px; border-radius: 24px; border: 1px solid rgba(167,139,250,.25); background: rgba(17,21,31,.82); backdrop-filter: blur(16px); }}
+      pre {{ white-space: pre-wrap; word-break: break-word; font: inherit; color: rgba(245,247,251,.78); }}
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <p class="eyebrow">AIA Studio</p>
+      <h1>{safe_title}</h1>
+      <p>Socle Laravel monolithique prêt, avec Blade et SQLite à la racine du projet.</p>
+      <section class="card">
+        <h2>Livrables de départ</h2>
+        <pre>{summary}</pre>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
+
+def _laravel_app_css() -> str:
+    return """body { margin: 0; }
+"""
+
+
+def _documentation_specs(
+    project_title: str,
+    project_id: str,
+    input_text: str,
+    deliverables: dict[str, Any],
+    stack: dict[str, str],
+    workspace_root: str,
+) -> list[tuple[str, str]]:
+    slug = slugify_project_title(project_title)
+    return [
+        ("README.md", _readme(project_title, project_id, deliverables, workspace_root, stack)),
+        ("docs/cdc.md", str(deliverables.get("cdc") or "").strip() or "# CDC\n"),
+        ("docs/mcd.md", str(deliverables.get("mcd") or "").strip() or "# MCD\n"),
+        ("docs/architecture.md", str(deliverables.get("architecture") or "").strip() or "# Architecture\n"),
+        ("docs/roadmap.md", str(deliverables.get("roadmap") or "").strip() or "# Roadmap\n"),
+        ("docs/notes_synthese.md", str(deliverables.get("notes_synthese") or "").strip() or "# Notes de synthese\n"),
+        ("docs/stack_decision.md", _stack_decision(project_title, input_text, stack)),
+        ("docs/global_environment.md", _global_environment(project_title, project_id, stack)),
+        ("docs/implementation_plan.md", _implementation_plan(project_title, input_text, deliverables)),
+        ("docs/requirements_matrix.md", _requirements_matrix(project_title, input_text, deliverables, stack)),
+        ("docs/openhands_handoff.md", _openhands_handoff(project_title, project_id, input_text, deliverables, stack)),
+        (".aia/workspace-policy.json", _workspace_policy(str(Path(workspace_root).resolve() / f"{slug}_{project_id}"))),
+    ]
+
+
+def _stack_decision(project_title: str, input_text: str, stack: dict[str, str]) -> str:
+    layout = "monolithique" if stack.get("generation_frontend") == "monolith" else "séparé"
+    frontend_decision = (
+        "Aucun dossier `frontend/` n'est requis par les agents."
+        if layout == "monolithique"
+        else "OpenHands décidera de la présence d'un dossier `frontend/` et le créera uniquement si le stack le justifie."
+    )
+    backend_decision = (
+        "Aucun dossier `backend/` n'est requis par les agents."
+        if layout == "monolithique"
+        else "OpenHands décidera de la présence d'un dossier `backend/` et le créera uniquement si le stack le justifie."
+    )
+    return f"""# Décision de stack
+
+## Projet
+- Titre: {project_title}
+
+## Brief de départ
+{input_text.strip()[:1800]}
+
+## Stack détectée
+- backend: `{stack.get('backend')}`
+- frontend: `{stack.get('frontend')}`
+- mobile: `{stack.get('mobile')}`
+- base de données: `{stack.get('database')}`
+- langages: `{stack.get('languages')}`
+
+## Décision de structure
+- layout retenu: `{layout}`
+- génération source par les agents: `non`
+- génération source par OpenHands: `oui`
+
+## Conséquence sur le dépôt
+- {frontend_decision}
+- {backend_decision}
+
+## Règle de pilotage
+Les agents du studio produisent uniquement les documents de cadrage.
+OpenHands prend ensuite la main pour créer la structure de code source la plus adaptée au stack validé.
+"""
+
+
+def _global_environment(project_title: str, project_id: str, stack: dict[str, str]) -> str:
+    return f"""# Global Environment
+
+## Projet
+- Titre: {project_title}
+- Project ID: `{project_id}`
+
+## Rôle de ce document
+Ce fichier sert de contrat d'environnement global pour OpenHands.
+Il doit être lu avant toute modification de code.
+
+## Contraintes obligatoires
+- Tout doit être exécuté dans Docker.
+- Ne jamais dépendre d'outils installés sur l'hôte.
+- Vérifier l'état runtime avec des commandes comme `docker compose ps`.
+- Lancer les commandes applicatives dans le conteneur adéquat avec `docker compose exec`.
+- Si le stack n'est pas prêt, ajuster d'abord les fichiers Docker.
+
+## Commandes de contrôle attendues
+- `docker compose ps`
+- `docker compose exec <service> composer --version`
+- `docker compose exec <service> php artisan --version`
+- `docker compose exec <service> php -v`
+
+## Exemple concret pour Laravel
+Quand le projet est en Laravel, les vérifications et opérations doivent ressembler à ceci:
+
+```bash
+docker compose ps
+docker compose exec app composer install
+docker compose exec app php artisan --version
+docker compose exec app php artisan migrate --force
+```
+
+Remplace `app` par le nom réel du service applicatif si nécessaire.
+
+## Stack détectée
+- backend: `{stack.get('backend')}`
+- frontend: `{stack.get('frontend')}`
+- base de données: `{stack.get('database')}`
+- layout: `{ 'monolithique' if stack.get('generation_frontend') == 'monolith' else 'séparé' }`
+
+## Rappel déploiement
+- Compatible `docker_manager`
+- Compatible `traefik_master`
+- Réseau partagé `proxy_net`
+- Labels Traefik obligatoires
+- Domaine cible du type `mon-projet.it-sefako.com`
+- `docker-compose.yml`, `docker-compose.traefik.yml`, `docker-manager.yml` maintenus
+- `.env.example` clair et reproductible
+"""
+
+
+def _openhands_handoff(
+    project_title: str,
+    project_id: str,
+    input_text: str,
+    deliverables: dict[str, Any],
+    stack: dict[str, str],
+) -> str:
+    docs = [
+        "docs/global_environment.md",
+        "docs/openhands_handoff.md",
+        "README.md",
+        "docs/cdc.md",
+        "docs/mcd.md",
+        "docs/architecture.md",
+        "docs/roadmap.md",
+        "docs/notes_synthese.md",
+        "docs/stack_decision.md",
+        "docs/implementation_plan.md",
+        "docs/requirements_matrix.md",
+    ]
+    return f"""# Handoff OpenHands
+
+## Contexte
+- Projet: {project_title}
+- Project ID: `{project_id}`
+- Mode opératoire: les agents du studio ne produisent que les documents Markdown.
+- Responsabilité OpenHands: générer le code source réel, les fichiers de build, les routes, les composants et la structure finale du dépôt.
+
+## Instructions de démarrage
+1. Lire les documents du dossier `docs/` listés ci-dessous.
+2. Interpréter le stack détecté et confirmer s'il faut un frontend et un backend séparés.
+3. Si le stack est monolithique, garder la structure source à la racine du projet.
+4. Si le stack nécessite une séparation, créer uniquement la séparation utile, pas de structure artificielle.
+5. Générer le code source dans le workspace OpenHands, pas dans les agents du studio.
+6. Commencer par une conversation canonique du projet et conserver le contexte des documents fournis.
+
+## Documents de référence
+- {chr(10).join(f'- `{doc}`' for doc in docs)}
+
+## Brief initial
+{input_text.strip()[:2000]}
+
+## Stack détectée
+- backend: `{stack.get('backend')}`
+- frontend: `{stack.get('frontend')}`
+- mobile: `{stack.get('mobile')}`
+- base de données: `{stack.get('database')}`
+- generation backend: `{stack.get('generation_backend')}`
+- generation frontend: `{stack.get('generation_frontend')}`
+
+## Livrables déjà préparés par les agents
+```json
+{json.dumps({
+    "cdc": str(deliverables.get("cdc") or "")[:1200],
+    "mcd": str(deliverables.get("mcd") or "")[:1200],
+    "architecture": str(deliverables.get("architecture") or "")[:1200],
+    "roadmap": str(deliverables.get("roadmap") or "")[:1200],
+    "notes_synthese": str(deliverables.get("notes_synthese") or "")[:1200],
+}, ensure_ascii=True, indent=2)}
+```
+
+## Règle d'or
+Ne redemande pas à l'utilisateur de reproduire le cadrage déjà fourni.
+Pars des documents existants et produis directement le code source attendu.
+"""
 
 def _next_frontend_dockerfile() -> str:
     return """FROM node:20-alpine
@@ -1080,33 +1402,34 @@ def _requirements_matrix(project_title: str, input_text: str, deliverables: dict
     rows = [
         "# Matrice de couverture du CDC",
         "",
-        "| # | Exigence | Couverture actuelle | Fichiers concernés | Statut |",
+        "| # | Exigence | Couverture actuelle | Références | Statut |",
         "|---|---|---|---|---|",
     ]
     for index, requirement in enumerate(requirements, 1):
         lowered = requirement.lower()
-        files = ["docs/cdc.md"]
+        refs = ["docs/cdc.md", "docs/stack_decision.md", "docs/openhands_handoff.md"]
         if any(word in lowered for word in ["api", "backend", "base", "donnée", "donnee", "auth", "crud", "laravel", "fastapi"]):
-            files.append("backend/")
+            refs.append("docs/openhands_handoff.md")
         if any(word in lowered for word in ["interface", "utilisateur", "page", "mobile", "frontend", "dashboard", "écran", "ecran"]):
-            files.append("frontend/")
+            refs.append("docs/stack_decision.md")
         if any(word in lowered for word in ["docker", "déploiement", "deploiement", "traefik", "env"]):
-            files.extend(["docker-compose.yml", "docker-compose.traefik.yml", ".env.example"])
-        coverage = "Tracé dans le repo généré et à compléter pendant les itérations IA/humain."
-        status = "couvert" if len(files) > 1 else "à préciser"
-        rows.append(f"| {index} | {requirement.replace('|', '/')} | {coverage} | {', '.join(dict.fromkeys(files))} | {status} |")
+            refs.extend(["docs/openhands_handoff.md", "README.md"])
+        coverage = "Tracé dans les documents de cadrage et le handoff OpenHands. Le code source est délégué à OpenHands."
+        status = "couvert" if len(refs) > 2 else "à préciser"
+        rows.append(f"| {index} | {requirement.replace('|', '/')} | {coverage} | {', '.join(dict.fromkeys(refs))} | {status} |")
     rows.extend([
         "",
         "## Stack reconnue",
         f"- backend demandé: `{stack.get('backend')}`",
         f"- frontend demandé: `{stack.get('frontend')}`",
-        f"- backend généré: `{stack.get('generation_backend')}`",
-        f"- frontend généré: `{stack.get('generation_frontend')}`",
+        f"- backend généré par agents: `non`",
+        f"- frontend généré par agents: `non`",
+        f"- backend confié à: `OpenHands`",
+        f"- frontend confié à: `OpenHands`",
         "",
-        "Cette matrice sert de contrat de vérification pour les prochaines passes de développement.",
+        "Cette matrice sert de contrat de vérification pour le cadrage et le handoff OpenHands.",
     ])
     return "\n".join(rows) + "\n"
-
 
 def _delivery_review(project_title: str, stack: dict[str, str], validation: dict[str, Any]) -> str:
     missing = validation.get("missing_files") or []
@@ -1148,34 +1471,29 @@ def validate_workspace_delivery(
     stack = detect_application_stack(project_title, input_text, deliverables)
     required_files = [
         "README.md",
-        ".env.example",
-        ".env",
-        "docker-compose.yml",
-        "docker-compose.traefik.yml",
-        "DEPLOY.md",
         "docs/cdc.md",
         "docs/mcd.md",
         "docs/architecture.md",
         "docs/roadmap.md",
+        "docs/notes_synthese.md",
+        "docs/stack_decision.md",
+        "docs/global_environment.md",
         "docs/implementation_plan.md",
-        "backend/Dockerfile",
-        "frontend/Dockerfile",
+        "docs/requirements_matrix.md",
+        "docs/openhands_handoff.md",
+        ".aia/workspace-policy.json",
     ]
     missing_files = [relative for relative in required_files if not (base / relative).exists()]
-    compose = (base / "docker-compose.yml").read_text(errors="ignore") if (base / "docker-compose.yml").exists() else ""
-    traefik = (base / "docker-compose.traefik.yml").read_text(errors="ignore") if (base / "docker-compose.traefik.yml").exists() else ""
-    env_example = (base / ".env.example").read_text(errors="ignore") if (base / ".env.example").exists() else ""
-    backend_health = ""
-    for candidate in [base / "backend/app/main.py", base / "backend/public/index.php", base / "backend/app/Http/Controllers/ProjectSummaryController.php"]:
-        if candidate.exists():
-            backend_health += candidate.read_text(errors="ignore") + "\n"
+
+    readme = (base / "README.md").read_text(errors="ignore") if (base / "README.md").exists() else ""
+    stack_decision = (base / "docs/stack_decision.md").read_text(errors="ignore") if (base / "docs/stack_decision.md").exists() else ""
+    handoff = (base / "docs/openhands_handoff.md").read_text(errors="ignore") if (base / "docs/openhands_handoff.md").exists() else ""
 
     checks = [
-        {"key": "required_files", "label": "Fichiers minimum du repo présents", "ok": not missing_files},
-        {"key": "compose_services", "label": "docker-compose déclare backend, frontend et db", "ok": all(token in compose for token in ["backend:", "frontend:", "db:"])},
-        {"key": "traefik_labels", "label": "docker-compose.traefik.yml contient les labels Traefik", "ok": "traefik.enable=true" in traefik and "proxy_net" in traefik},
-        {"key": "env_contract", "label": ".env.example expose les domaines, ports et secrets", "ok": all(token in env_example for token in ["FRONTEND_DOMAIN", "API_DOMAIN", "POSTGRES_DB", "SECRET_KEY"])},
-        {"key": "health_endpoint", "label": "Backend expose un point de santé", "ok": "health" in backend_health.lower()},
+        {"key": "required_files", "label": "Documents minimum du repo présents", "ok": not missing_files},
+        {"key": "readme_mentions_openhands", "label": "README documente le passage de relais à OpenHands", "ok": "OpenHands" in readme and "Markdown" in readme},
+        {"key": "stack_decision_present", "label": "Décision de stack documentée", "ok": "Décision de stack" in stack_decision and stack.get("backend") in stack_decision},
+        {"key": "openhands_handoff_present", "label": "Handoff OpenHands documenté", "ok": "Handoff OpenHands" in handoff and "générer le code source" in handoff},
         {"key": "workspace_guard", "label": "Politique de confinement présente", "ok": (base / ".aia/workspace-policy.json").exists()},
     ]
     success = all(check["ok"] for check in checks)
@@ -1205,7 +1523,6 @@ def validate_workspace_delivery(
     }, ensure_ascii=True, indent=2))
     validation["files"] = sorted([str(item.relative_to(base)) for item in base.rglob("*") if item.is_file()])
     return validation
-
 
 def _workspace_policy(project_dir: str) -> str:
     return json.dumps({
@@ -1264,7 +1581,8 @@ def _readme(project_title: str, project_id: str, deliverables: dict[str, Any], w
 
 Project ID: `{project_id}`
 
-Ce workspace a été initialisé par AIA Studio pour la phase de conception technique.
+Ce workspace est un espace de cadrage documentaire pour AIA Studio.
+Les agents du studio produisent les documents Markdown, puis OpenHands prend le relais pour générer le code source.
 
 ## Stack détectée
 - backend demandé: `{stack.get('backend')}`
@@ -1273,13 +1591,15 @@ Ce workspace a été initialisé par AIA Studio pour la phase de conception tech
 - base de données détectée: `{stack.get('database')}`
 - langages détectés: `{stack.get('languages')}`
 
-## Famille de scaffold générée
-- backend généré: `{stack.get('generation_backend')}`
-- frontend généré: `{stack.get('generation_frontend')}`
+## Décision de livraison
+- code source généré par les agents: `non`
+- code source généré par OpenHands: `oui`
+- structure du dépôt décidée par le couple cadrage + OpenHands
 
-## Garde-fous
+## Règles de travail
 - racine de génération: `{workspace_root}`
-- toutes les écritures sont limitées au dossier de ce projet
+- les agents n'écrivent que des documents Markdown et les garde-fous internes
+- OpenHands reçoit ensuite le contexte et produit le dépôt exécutable
 - aucun accès direct à `docker_manager`, `traefik_master` ou aux autres projets
 
 ## Livrables d'entrée
@@ -1301,30 +1621,13 @@ async def initialize_project_workspace(
     project_dir.mkdir(parents=True, exist_ok=True)
     ensure_within_workspace(project_dir, project_dir)
 
-    slug = slugify_project_title(project_title)
     input_text = str(deliverables.get('input_text') or '')
     stack = detect_application_stack(project_title, input_text, deliverables)
-    stack_deliverables = {**deliverables, 'input_text': input_text}
-    
-    backend_specs = await _backend_file_specs(project_title, stack_deliverables, stack)
-    frontend_specs = await _frontend_file_specs(project_title, stack_deliverables, stack)
-    
+    docs_specs = _documentation_specs(project_title, project_id, input_text, deliverables, stack, root_path)
+
     files = [
-        _write_workspace_file(project_dir, 'README.md', _readme(project_title, project_id, deliverables, root_path, stack)),
-        _write_workspace_file(project_dir, '.env.example', _project_env_template(slug, stack)),
-        _write_workspace_file(project_dir, '.env', _project_env_template(slug, stack)),
-        _write_workspace_file(project_dir, 'docker-compose.yml', _project_compose_template(slug, stack)),
-        _write_workspace_file(project_dir, 'docker-compose.traefik.yml', _project_traefik_template(slug, stack)),
-        *[_write_workspace_file(project_dir, relative_path, content) for relative_path, content in backend_specs],
-        *[_write_workspace_file(project_dir, relative_path, content) for relative_path, content in frontend_specs],
-        _write_workspace_file(project_dir, 'docs/cdc.md', str(deliverables.get('cdc') or '').strip() or '# CDC\n'),
-        _write_workspace_file(project_dir, 'docs/mcd.md', str(deliverables.get('mcd') or '').strip() or '# MCD\n'),
-        _write_workspace_file(project_dir, 'docs/architecture.md', str(deliverables.get('architecture') or '').strip() or '# Architecture\n'),
-        _write_workspace_file(project_dir, 'docs/roadmap.md', str(deliverables.get('roadmap') or '').strip() or '# Roadmap\n'),
-        _write_workspace_file(project_dir, 'docs/notes_synthese.md', str(deliverables.get('notes_synthese') or '').strip() or '# Notes de synthese\n'),
-        _write_workspace_file(project_dir, 'docs/implementation_plan.md', _implementation_plan(project_title, input_text, deliverables)),
-        _write_workspace_file(project_dir, 'docs/requirements_matrix.md', _requirements_matrix(project_title, input_text, deliverables, stack)),
-        _write_workspace_file(project_dir, '.aia/workspace-policy.json', _workspace_policy(str(project_dir.resolve()))),
+        _write_workspace_file(project_dir, relative_path, content)
+        for relative_path, content in docs_specs
     ]
 
     _set_workspace_permissions(project_dir)
@@ -1349,36 +1652,11 @@ async def generate_application_foundation(
 ) -> dict[str, Any]:
     base = Path(project_dir).resolve()
     ensure_within_workspace(base, base)
-    slug = slugify_project_title(project_title)
     stack = detect_application_stack(project_title, input_text, deliverables)
-    stack_deliverables = {**deliverables, 'input_text': input_text}
-    specs = [
-        ('README.md', _readme(project_title, project_id, deliverables, str(base.parent), stack)),
-        ('.env.example', _project_env_template(slug, stack)),
-        ('.env', _project_env_template(slug, stack)),
-        ('docker-compose.yml', _project_compose_template(slug, stack)),
-        ('docker-compose.traefik.yml', _project_traefik_template(slug, stack)),
-        ('docs/implementation_plan.md', _implementation_plan(project_title, input_text, deliverables)),
-        ('docs/requirements_matrix.md', _requirements_matrix(project_title, input_text, deliverables, stack)),
-        ('.aia/workspace-policy.json', _workspace_policy(str(base))),
-        ('DEPLOY.md', _deploy_readme(slug, str(base))),
-        ('manifest.aia.json', json.dumps({
-            'project_id': project_id,
-            'project_title': project_title,
-            'workspace': str(base),
-            'docker_manager_compatible': True,
-            'generated_at': utc_now_iso(),
-            'stack': stack,
-        }, ensure_ascii=True, indent=2)),
-    ]
-    
-    backend_specs = await _backend_file_specs(project_title, stack_deliverables, stack, llm_router)
-    frontend_specs = await _frontend_file_specs(project_title, stack_deliverables, stack, llm_router)
-    
-    specs.extend(backend_specs)
-    specs.extend(frontend_specs)
-    
-    files = [_write_workspace_file(base, relative_path, content) for relative_path, content in specs]
+    docs_specs = _documentation_specs(project_title, project_id, input_text, deliverables, stack, str(base.parent))
+    files = []
+    for relative_path, content in docs_specs:
+        files.append(_write_workspace_file(base, relative_path, content))
     _set_workspace_permissions(base)
     return {
         'project_dir': str(base),

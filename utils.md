@@ -45,6 +45,11 @@ Depuis le dossier du projet, après `docker compose down`:
 docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml up -d --build
 ```
 docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml restart backend frontend
+
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml up -d --force-recreate backend
+
+docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml up -d --force-recreate openhands
+
 **Mode prod**
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build

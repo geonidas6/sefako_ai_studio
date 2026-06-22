@@ -235,6 +235,45 @@ export default function ProjectWorkspacePage() {
 
   const statusBadge = status?.ready ? 'Prêt' : status?.enabled ? 'Connecté' : 'Hors ligne';
   const connectionTone = status?.ready ? 'text-emerald-400' : status?.enabled ? 'text-primary' : 'text-muted-foreground';
+  const projectStatus = String(project?.status || '').toLowerCase();
+  const projectStatusLabel = (() => {
+    switch (projectStatus) {
+      case 'completed': return 'Projet terminé';
+      case 'running': return 'Projet en cours';
+      case 'paused': return 'Projet en pause';
+      case 'failed': return 'Projet en erreur';
+      default: return 'Projet en attente';
+    }
+  })();
+  const projectStatusTone = (() => {
+    switch (projectStatus) {
+      case 'completed': return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500';
+      case 'running': return 'border-primary/20 bg-primary/10 text-primary';
+      case 'failed': return 'border-destructive/20 bg-destructive/10 text-destructive';
+      case 'paused': return 'border-amber-500/20 bg-amber-500/10 text-amber-500';
+      default: return 'border-border bg-background text-muted-foreground';
+    }
+  })();
+  const openhandsPipeline = project?.final_deliverables?.implementation_pipeline || {};
+  const openhandsPipelineStatus = String(openhandsPipeline?.overall_status || openhandsPipeline?.status || '').toLowerCase();
+  const openhandsStatusLabel = (() => {
+    switch (openhandsPipelineStatus) {
+      case 'completed': return 'OpenHands terminé';
+      case 'running': return 'OpenHands en cours';
+      case 'awaiting_admin_approval': return 'OpenHands en attente';
+      case 'failed': return 'OpenHands en erreur';
+      default: return workspaceDir ? 'OpenHands prêt' : 'OpenHands non lancé';
+    }
+  })();
+  const openhandsStatusTone = (() => {
+    switch (openhandsPipelineStatus) {
+      case 'completed': return 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500';
+      case 'running': return 'border-primary/20 bg-primary/10 text-primary';
+      case 'failed': return 'border-destructive/20 bg-destructive/10 text-destructive';
+      case 'awaiting_admin_approval': return 'border-amber-500/20 bg-amber-500/10 text-amber-500';
+      default: return 'border-border bg-background text-muted-foreground';
+    }
+  })();
 
   return (
     <AuthGuard>
@@ -248,6 +287,8 @@ export default function ProjectWorkspacePage() {
                 </Link>
                 <div className="flex flex-wrap items-center gap-3">
                   <h1 className="text-2xl font-bold tracking-tight">OpenHands workspace</h1>
+                  <span className={cn('rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-widest', projectStatusTone)}>{projectStatusLabel}</span>
+                  <span className={cn('rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-widest', openhandsStatusTone)}>{openhandsStatusLabel}</span>
                   <span className={cn('rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-widest', status?.ready ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500' : 'border-border bg-background text-muted-foreground')}>
                     {statusBadge}
                   </span>
@@ -330,7 +371,7 @@ export default function ProjectWorkspacePage() {
                   </div>
                 </div>
               </CardHeader>
-              <CardContent className="grid min-h-[calc(100vh-300px)] w-full gap-0 p-0 xl:grid-cols-[auto_minmax(0,1fr)_auto]">
+              <CardContent className="relative min-h-[calc(100vh-300px)] w-full p-0">
                 <button
                   type="button"
                   onClick={() => setLeftPanelOpen(true)}
@@ -433,7 +474,7 @@ export default function ProjectWorkspacePage() {
                   )}
                 </AnimatePresence>
 
-                <div className="min-h-0 border-y border-border/60 bg-background xl:border-y-0 xl:border-r xl:border-border/60">
+                <div className="min-h-0 w-full border-y border-border/60 bg-background xl:border-y-0">
                   <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
                     <div>
                       <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-primary">OpenHands workspace</p>

@@ -66,6 +66,22 @@ function parseMarkdown(md: string = ''): string {
   }).join('');
 }
 
+function stripMarkdown(md: string = ''): string {
+  if (!md) return '';
+  return md
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/_(.*?)_/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '• ')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/\[(.*?)\]\((.*?)\)/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 interface GenerationSettings {
   root_path: string;
@@ -274,12 +290,17 @@ export default function ProjectDashboard() {
     target?: string;
     timestamp?: string;
   }[]>([]);
+  const [expandedMessages, setExpandedMessages] = useState<Record<string, boolean>>({});
   const [runningAgents, setRunningAgents] = useState<Record<string, boolean>>({});
   const [agentStatuses, setAgentStatuses] = useState<Record<string, string>>({});
   const [wsStatus, setWsStatus] = useState<'connecting' | 'running' | 'idle' | 'error' | 'paused'>('idle');
   const [currentRound, setCurrentRound] = useState<number | null>(null);
 
   const selectedWorkspaceEntry = workspaceFiles.find((entry) => entry.path === selectedWorkspaceFile) || null;
+
+  const toggleMessageExpansion = (key: string) => {
+    setExpandedMessages((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const wsCleanupRef = useRef<(() => void) | null>(null);
   const seenEventSequencesRef = useRef<Set<number>>(new Set());
@@ -805,6 +826,44 @@ export default function ProjectDashboard() {
   const round2Complete = Boolean(critiques.strategy && critiques.ux && critiques.engineering && critiques.devops);
   const hasDeliverables = Boolean(deliverables.cdc || deliverables.mcd || deliverables.architecture || deliverables.roadmap);
 
+  const projectStatusLabel = (() => {
+    switch (project.status) {
+      case 'completed': return 'Projet terminé';
+      case 'running': return 'Projet en cours';
+      case 'paused': return 'Projet en pause';
+      case 'failed': return 'Projet en erreur';
+      default: return 'Projet en attente';
+    }
+  })();
+  const projectStatusTone = (() => {
+    switch (project.status) {
+      case 'completed': return 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20';
+      case 'running': return 'bg-primary/10 text-primary border-primary/20 animate-pulse';
+      case 'failed': return 'bg-destructive/10 text-destructive border-destructive/20';
+      case 'paused': return 'bg-amber-500/10 text-amber-500 border-amber-500/20';
+      default: return 'bg-muted text-muted-foreground border-border';
+    }
+  })();
+  const openhandsPipelineStatus = String(implementationPipeline?.overall_status || implementationPipeline?.status || '').toLowerCase();
+  const openhandsStatusLabel = (() => {
+    switch (openhandsPipelineStatus) {
+      case 'completed': return 'OpenHands terminé';
+      case 'running': return 'OpenHands en cours';
+      case 'awaiting_admin_approval': return 'OpenHands en attente';
+      case 'failed': return 'OpenHands en erreur';
+      default: return workspaceInfo ? 'OpenHands prêt' : 'OpenHands non lancé';
+    }
+  })();
+  const openhandsStatusTone = (() => {
+    switch (openhandsPipelineStatus) {
+      case 'completed': return 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20';
+      case 'running': return 'bg-primary/10 text-primary border-primary/20 animate-pulse';
+      case 'failed': return 'bg-destructive/10 text-destructive border-destructive/20';
+      case 'awaiting_admin_approval': return 'bg-amber-500/10 text-amber-500 border-amber-500/20';
+      default: return 'bg-muted text-muted-foreground border-border';
+    }
+  })();
+
   const getTabProgress = (tabId: 'live' | 'r1' | 'r2' | 'deliverables') => {
     if (project.status === 'failed') {
       if ((tabId === 'r1' && currentRound === 1) || (tabId === 'r2' && (currentRound || 0) >= 2) || (tabId === 'deliverables' && !hasDeliverables)) return 'error';
@@ -886,7 +945,31 @@ export default function ProjectDashboard() {
                       </span>
                       {item.target && <span className="text-[10px] text-primary">→ {item.target}</span>}
                     </div>
-                    <p className="text-sm leading-relaxed text-muted-foreground whitespace-pre-wrap">{item.message}</p>
+                    {(() => {
+                      const messageKey = `${item.timestamp || 'msg'}-${i}-${item.agent}-${item.phase || 'default'}`;
+                      const isExpanded = !!expandedMessages[messageKey];
+                      const rawMessage = item.message || '';
+                      const shouldCollapse = rawMessage.length > 280 || /(^|\n)#{1,6}\s|```|\*\*|^\s*[-*+]\s/m.test(rawMessage);
+                      const previewText = stripMarkdown(rawMessage);
+                      const previewMessage = previewText.length > 260 ? `${previewText.slice(0, 260).trimEnd()}…` : previewText;
+                      const renderedHtml = parseMarkdown(isExpanded || !shouldCollapse ? rawMessage : previewMessage);
+                      return (
+                        <div className="space-y-3">
+                          <div className="markdown-content text-sm leading-relaxed text-muted-foreground" dangerouslySetInnerHTML={{ __html: renderedHtml }} />
+                          {shouldCollapse && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-2 text-xs text-primary hover:text-primary"
+                              onClick={() => toggleMessageExpansion(messageKey)}
+                            >
+                              {isExpanded ? 'Voir moins' : 'Voir plus'}
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </motion.div>
               ))}
@@ -1130,33 +1213,27 @@ export default function ProjectDashboard() {
                 <Link href="/" className="inline-flex items-center text-xs text-muted-foreground hover:text-foreground transition-colors mb-2">
                   <ChevronLeft className="mr-1 h-3 w-3" /> Retour
                 </Link>
-                <h1 className="text-2xl font-bold font-display tracking-tight flex items-center gap-3">
+                <h1 className="text-2xl font-bold font-display tracking-tight">
                   {project.title}
+                </h1>
+                <div className="flex flex-wrap items-center gap-2">
                   <span
                     className={cn(
-                      'text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-widest',
-                      project.status === 'completed'
-                        ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
-                        : project.status === 'running'
-                          ? 'bg-primary/10 text-primary border border-primary/20 animate-pulse'
-                          : project.status === 'failed'
-                            ? 'bg-destructive/10 text-destructive border border-destructive/20'
-                            : project.status === 'paused'
-                              ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
-                              : 'bg-muted text-muted-foreground border border-border'
+                      'text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-widest border',
+                      projectStatusTone
                     )}
                   >
-                    {project.status === 'completed'
-                      ? 'Terminé'
-                      : project.status === 'running'
-                        ? 'En cours'
-                        : project.status === 'failed'
-                          ? 'Échoué'
-                          : project.status === 'paused'
-                            ? 'En pause'
-                            : 'En attente'}
+                    {projectStatusLabel}
                   </span>
-                </h1>
+                  <span
+                    className={cn(
+                      'text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-widest border',
+                      openhandsStatusTone
+                    )}
+                  >
+                    {openhandsStatusLabel}
+                  </span>
+                </div>
                 <p className="text-sm text-muted-foreground line-clamp-1 max-w-2xl">{project.input_text}</p>
               </div>
 

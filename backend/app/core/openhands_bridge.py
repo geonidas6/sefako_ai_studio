@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -45,15 +46,19 @@ async def _get_session_api_key() -> str | None:
 
 def _project_context_docs(project_dir: Path) -> str:
     candidate_paths = [
+        project_dir / 'docs/global_environment.md',
+        project_dir / 'docs/openhands_handoff.md',
         project_dir / 'README.md',
-        project_dir / 'DEPLOY.md',
         project_dir / 'docs/cdc.md',
         project_dir / 'docs/mcd.md',
         project_dir / 'docs/architecture.md',
         project_dir / 'docs/roadmap.md',
         project_dir / 'docs/notes_synthese.md',
+        project_dir / 'docs/stack_decision.md',
         project_dir / 'docs/implementation_plan.md',
         project_dir / 'docs/requirements_matrix.md',
+        project_dir / 'docs/delivery_review.md',
+        project_dir / 'docs/test_report.md',
     ]
     sections: list[str] = []
     for doc_path in candidate_paths:
@@ -72,12 +77,38 @@ def _project_context_docs(project_dir: Path) -> str:
     return '\n\n'.join(sections)
 
 
+def _bootstrap_marker_path(project_dir: Path) -> Path:
+    return project_dir / '.aia' / 'openhands_bootstrap.json'
+
+
+def _read_bootstrap_marker(project_dir: Path) -> dict[str, Any]:
+    marker = _bootstrap_marker_path(project_dir)
+    if not marker.exists():
+        return {}
+    try:
+        data = json.loads(marker.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_bootstrap_marker(project_dir: Path, bootstrap_hash: str, conversation_id: str) -> None:
+    marker = _bootstrap_marker_path(project_dir)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        'bootstrap_hash': bootstrap_hash,
+        'conversation_id': conversation_id,
+    }, ensure_ascii=True, indent=2), encoding='utf-8')
+
+
 def _build_project_seed_message(project_title: str, project_dir: Path, brief: str | None = None, deliverables: dict[str, Any] | None = None) -> str:
     seed = [
         f'You are OpenHands for the project `{project_title}`.',
         f'Workspace: `{project_dir}`',
         'Use this conversation as the canonical project workspace thread.',
-        'Read the project context, then keep all changes inside the workspace.',
+        'First action: open docs/global_environment.md and read it before inspecting README, code, or running any command.',
+        'Then read docs/openhands_handoff.md and the other Markdown context files before taking action.',
+        'Keep all changes inside the workspace and execute only through Docker.',
     ]
     context_docs = _project_context_docs(project_dir)
     if context_docs:
@@ -124,12 +155,7 @@ def _project_deliverable_docs(deliverables: dict[str, Any] | None) -> str:
 
 def _build_openhands_llm_payload() -> dict[str, Any] | None:
     model = _normalize_text(os.getenv('OPENHANDS_LLM_MODEL')) or _normalize_text(os.getenv('LLM_MODEL')) or 'gpt-5.5'
-    api_key = (
-        _normalize_text(os.getenv('OPENHANDS_LLM_API_KEY'))
-        or _normalize_text(os.getenv('LLM_API_KEY'))
-        or _normalize_text(os.getenv('OPENAI_API_KEY'))
-        or None
-    )
+    api_key = _normalize_text(os.getenv('OPENHANDS_LLM_API_KEY')) or _normalize_text(os.getenv('LLM_API_KEY')) or None
     base_url = _normalize_text(os.getenv('OPENHANDS_LLM_BASE_URL')) or _normalize_text(os.getenv('LLM_BASE_URL')) or None
     llm_payload: dict[str, Any] = {'model': model}
     if api_key:
@@ -200,6 +226,9 @@ async def ensure_project_conversation(
         'tags': {'aiabootstrap': bootstrap_hash},
     }
 
+    local_marker = _read_bootstrap_marker(project_dir)
+    bootstrap_already_written = local_marker.get('bootstrap_hash') == bootstrap_hash
+
     async with httpx.AsyncClient(base_url=agent_server_url, timeout=30.0, follow_redirects=True, headers=headers) as client:
         response = await client.get(f'/api/conversations/{conversation_id}')
         if response.status_code == 404:
@@ -207,6 +236,7 @@ async def ensure_project_conversation(
             create_response.raise_for_status()
             conversation = create_response.json()
             created = True
+            _write_bootstrap_marker(project_dir, bootstrap_hash, conversation_id)
         else:
             response.raise_for_status()
             conversation = response.json()
@@ -225,7 +255,7 @@ async def ensure_project_conversation(
                 except Exception:
                     pass
 
-            if existing_tags.get('aiabootstrap') != bootstrap_hash:
+            if not bootstrap_already_written and existing_tags.get('aiabootstrap') != bootstrap_hash:
                 send_response = await client.post(
                     f'/api/conversations/{conversation_id}/events',
                     json={
@@ -245,6 +275,9 @@ async def ensure_project_conversation(
                     tag_response.raise_for_status()
                 except Exception:
                     pass
+                _write_bootstrap_marker(project_dir, bootstrap_hash, conversation_id)
+            elif not bootstrap_already_written:
+                _write_bootstrap_marker(project_dir, bootstrap_hash, conversation_id)
 
     workspace = conversation.get('workspace') if isinstance(conversation, dict) else None
     return {
@@ -275,30 +308,31 @@ def _workspace_snapshot(project_dir: Path) -> dict[str, str]:
 
 
 def _build_instruction(project_title: str, brief: str, project_dir: Path) -> str:
-    return f"""You are OpenHands working on the project `{project_title}`.
-
-Constraints:
-- Stay strictly inside this workspace: `{project_dir}`
-- Do not modify files outside the repository root.
-- Prefer the existing architecture and conventions of the project.
-- If you need to inspect or edit files, use the workspace tools available to you.
-
-User brief:
-{brief}
-
-After making the requested changes, summarize what you changed and any follow-up needed.
-"""
+    return '\n'.join([
+        f"You are OpenHands working on the project `{project_title}`.",
+        "",
+        "Constraints:",
+        f"- Stay strictly inside this workspace: `{project_dir}`",
+        "- Do not modify files outside the repository root.",
+        "- Prefer the existing architecture and conventions of the project.",
+        "- If you need to inspect or edit files, use the workspace tools available to you.",
+        "- All work must be done through Docker; do not rely on host-installed binaries.",
+        "- Start by identifying the available Docker services and validating the runtime from inside the appropriate container.",
+        "- Use Docker commands such as `docker compose ps`, `docker compose exec <service> composer --version`, and `docker compose exec <service> php artisan --version` when applicable.",
+        "- If the application stack is not yet Docker-ready, create or fix `docker-compose.yml`, `docker-compose.traefik.yml`, `docker-manager.yml`, and the related Dockerfiles before trying to run app commands.",
+        "- Keep the project compatible with `docker_manager`, `traefik_master`, and `proxy_net`.",
+        "- Add the necessary Traefik labels and keep public/private services clearly separated when multiple services exist.",
+        "",
+        "User brief:",
+        brief,
+        "",
+        "After making the requested changes, summarize what you changed and any follow-up needed.",
+    ])
 
 
 def _resolve_llm_config() -> tuple[str, str | None, str | None]:
     model = _normalize_text(os.getenv('OPENHANDS_LLM_MODEL')) or _normalize_text(os.getenv('LLM_MODEL')) or 'gpt-5.2-codex'
-    api_key = (
-        _normalize_text(os.getenv('OPENHANDS_LLM_API_KEY'))
-        or _normalize_text(os.getenv('LLM_API_KEY'))
-        or _normalize_text(os.getenv('OPENAI_API_KEY'))
-        or _normalize_text(os.getenv('ANTHROPIC_API_KEY'))
-        or None
-    )
+    api_key = _normalize_text(os.getenv('OPENHANDS_LLM_API_KEY')) or _normalize_text(os.getenv('LLM_API_KEY')) or None
     base_url = _normalize_text(os.getenv('OPENHANDS_LLM_BASE_URL')) or _normalize_text(os.getenv('LLM_BASE_URL')) or None
     return model, api_key, base_url
 

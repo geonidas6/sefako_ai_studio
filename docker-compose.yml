@@ -37,6 +37,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
       OPENHANDS_INTERNAL_URL: ${OPENHANDS_INTERNAL_URL:-http://openhands:8000}
       OPENHANDS_AGENT_SERVER_URL: ${OPENHANDS_AGENT_SERVER_URL:-http://openhands:18000}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000","https://sefako-ai-studio.it-sefako.com"]}
@@ -89,18 +92,9 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - projects_data:/projects
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROK_API_KEY: ${GROK_API_KEY:-}
-      QWEN_API_KEY: ${QWEN_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      - openhands_state:/home/openhands/.openhands
 volumes:
   postgres_data:
   qwen_config:
   projects_data:
+  openhands_state:

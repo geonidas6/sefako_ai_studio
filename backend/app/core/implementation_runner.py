@@ -20,6 +20,7 @@ from app.core.project_workspace import (
     validate_workspace_delivery,
 )
 from app.core.workflow_runner import publish_project_event
+from app.core.openhands_bridge import ensure_project_conversation
 from app.db.database import AsyncSessionLocal
 from app.models.project import Project
 from app.core.llm_router import LLMRouter
@@ -30,12 +31,10 @@ IMPLEMENTATION_LOCKS: dict[str, asyncio.Lock] = {}
 
 PHASES = [
     ('technical_design', 'Conception technique'),
-    ('repository_scaffold', 'Scaffold du repo'),
-    ('backend_foundation', 'Socle backend'),
-    ('frontend_foundation', 'Socle frontend'),
-    ('docker_packaging', 'Compatibilité docker_manager'),
+    ('documentation_pack', 'Pack documentaire'),
+    ('openhands_bootstrap', 'Handoff OpenHands'),
     ('requirements_coverage', 'Couverture du CDC'),
-    ('automated_validation', 'Tests et validations'),
+    ('automated_validation', 'Validation documentaire'),
     ('delivery_review', 'Revue de livraison'),
 ]
 
@@ -169,7 +168,7 @@ async def start_implementation_pipeline(project_id: str) -> dict[str, Any]:
             input_text = project.input_text
             project_title = project.title
 
-        await _publish_pipeline(project_id, pipeline, 'Phase applicative lancée. Les employés préparent le repo projet.')
+        await _publish_pipeline(project_id, pipeline, 'Phase lancée. Les employés préparent le pack documentaire et le relais OpenHands.')
 
         async def runner() -> None:
             try:
@@ -203,14 +202,15 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
             project.final_deliverables = deliverables
             await db.commit()
 
-        feature_requests = ''
+        effective_input_text = input_text
         try:
             request_file = Path(str(workspace['project_dir'])).resolve() / 'docs/feature_requests.md'
             if request_file.exists():
                 feature_requests = request_file.read_text(encoding='utf-8', errors='ignore')[-6000:]
+                if feature_requests.strip():
+                    effective_input_text += f"\n\nDemandes applicatives depuis l'IDE:\n{feature_requests}"
         except Exception:
-            feature_requests = ''
-        effective_input_text = input_text + (f"\n\nDemandes applicatives depuis l'IDE:\n{feature_requests}" if feature_requests.strip() else '')
+            pass
 
         employees = {
             'strategy': {'name': 'Aminata', 'role': 'Lead Growth', 'avatar': 'AG'},
@@ -220,73 +220,69 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
             'orchestrator': {'name': 'Sefako Orchestrateur', 'role': 'Chef de projet IA', 'avatar': 'SO'},
         }
 
-        # Phase 1: technical design confirmation
         pipeline = set_pipeline_phase(pipeline, 'technical_design', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline)
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], f"Conception technique validée. Le workspace sécurisé est prêt dans {workspace['project_dir']}.", 'technical_design', 'workspace projet')
-        await _publish_pipeline(project_id, pipeline, 'Conception technique validée. Préparation du repo...')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], f"Conception technique validée. Le workspace documentaire est prêt dans {workspace['project_dir']}.", 'technical_design', 'workspace projet')
+        await _publish_pipeline(project_id, pipeline, 'Conception technique validée. Préparation du pack documentaire...')
 
-        # Phase 2..5: repo/app generation
-        stack = detect_application_stack(project_title, effective_input_text, deliverables)
-        backend_label = 'Laravel / PHP' if stack.get('backend') == 'laravel' else 'FastAPI'
-        frontend_label = 'Next.js' if stack.get('frontend') == 'nextjs' else 'frontend statique'
-
-        async with AsyncSessionLocal() as db:
-            llm_router = LLMRouter(db)
-            repo_info = await generate_application_foundation(
-                project_dir=workspace['project_dir'],
-                project_id=project_id,
-                project_title=project_title,
-                input_text=effective_input_text,
-                deliverables=deliverables,
-                llm_router=llm_router,
-            )
-        phase_messages = [
-            ('repository_scaffold', 'strategy', 'Stratégie', "Je verrouille le périmètre MVP et j'aligne le scaffold repo sur les livrables validés."),
-            ('backend_foundation', 'engineering', 'Ingénierie', f"Je structure le backend {backend_label} et les premiers points d'entrée API sans sortir du workspace projet."),
-            ('frontend_foundation', 'ux', 'UX', f"Je prépare le socle {frontend_label} du projet pour matérialiser le produit dès la première itération installable."),
-            ('docker_packaging', 'devops', 'DevOps', "Je finalise les fichiers Docker, Traefik et .env pour rester compatible avec le git deploy de docker_manager."),
-        ]
-        for phase_key, agent_key, department, message in phase_messages:
-            pipeline = set_pipeline_phase(pipeline, phase_key, 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
-            deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-            await _employee_message(project_id, agent_key, department, employees[agent_key], message, phase_key, 'repo projet')
-            await _publish_pipeline(project_id, pipeline, f'{department} travaille sur {phase_key}.')
-            pipeline = set_pipeline_phase(pipeline, phase_key, 'completed', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
-            deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-
-        pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je relis le CDC et je transforme les exigences en matrice de couverture vérifiable.", 'requirements_coverage', 'docs/requirements_matrix.md')
+        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je consolide le cadrage Markdown: CDC, MCD, architecture, roadmap, matrice et handoff OpenHands.", 'documentation_pack', 'docs/openhands_handoff.md')
+        await _publish_pipeline(project_id, pipeline, 'Pack documentaire préparé.')
+        pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+
+        pipeline = set_pipeline_phase(pipeline, 'openhands_bootstrap', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+        openhands_thread = None
+        try:
+            openhands_thread = await ensure_project_conversation(
+                project_id,
+                project_title,
+                Path(str(workspace['project_dir'])),
+                brief=effective_input_text,
+                deliverables=deliverables,
+            )
+            deliverables['openhands_conversation'] = openhands_thread
+            await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], 'Le contexte Markdown a été transmis à OpenHands pour générer le code source.', 'openhands_bootstrap', 'OpenHands')
+            await _publish_pipeline(project_id, pipeline, 'OpenHands a été initialisé avec le contexte du projet.')
+            pipeline = set_pipeline_phase(pipeline, 'openhands_bootstrap', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
+            deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+        except Exception as exc:
+            await _publish_pipeline(project_id, pipeline, f'OpenHands bootstrap en erreur: {exc}')
+
+        pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
+        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je relis le CDC et la décision de stack pour vérifier que chaque exigence est couverte par les documents et le handoff.", 'requirements_coverage', 'docs/requirements_matrix.md')
         validation = validate_workspace_delivery(
-            project_dir=repo_info['project_dir'],
+            project_dir=workspace['project_dir'],
             project_id=project_id,
             project_title=project_title,
             input_text=effective_input_text,
             deliverables=deliverables,
         )
-        repo_info['files'] = validation.get('files') or repo_info['files']
-        pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'completed', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
 
-        pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'devops', 'DevOps', employees['devops'], "Je lance les contrôles statiques de livraison: Docker, Traefik, .env, healthcheck, garde-fou workspace.", 'automated_validation', 'docs/test_report.md')
+        await _employee_message(project_id, 'devops', 'DevOps', employees['devops'], "Je lance les contrôles de conformité documentaire et le garde-fou workspace.", 'automated_validation', 'docs/test_report.md')
         if not validation.get('success'):
-            raise ValueError('Validation de livraison échouée: ' + ', '.join(validation.get('missing_files') or ['contrôle statique invalide']))
-        pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'completed', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+            raise ValueError('Validation documentaire échouée: ' + ', '.join(validation.get('missing_files') or ['contrôle statique invalide']))
+        pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
 
-        pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'running', overall_status='running', project_dir=repo_info['project_dir'], generated_files=repo_info['files'])
+        pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture, validation, manifest et consignes de déploiement.", 'delivery_review', 'docs/delivery_review.md')
-        pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'completed', overall_status='completed', project_dir=repo_info['project_dir'], generated_files=repo_info['files'], last_error=None)
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture documentaire, validation et handoff OpenHands.", 'delivery_review', 'docs/delivery_review.md')
+        pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'completed', overall_status='completed', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [], last_error=None)
 
         deliverables[IMPLEMENTATION_WORKSPACE_KEY] = {
             **workspace,
-            'files': repo_info['files'],
-            'generated_at': repo_info['generated_at'],
-            'repo_name': repo_info['repo_name'],
+            'files': workspace.get('files') or [],
+            'generated_at': workspace.get('generated_at'),
+            'repo_name': workspace.get('repo_name'),
+            'openhands_conversation': openhands_thread,
         }
         deliverables[IMPLEMENTATION_PIPELINE_KEY] = pipeline
         deliverables['implementation_validation'] = validation
@@ -297,10 +293,10 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
                 project.final_deliverables = deliverables
                 await db.commit()
 
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], 'Le repo technique est prêt. Il reste autonome, compatible docker_manager et confiné au dossier projet.', 'implementation_complete', 'repo projet')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], 'Le cadrage est prêt. OpenHands reçoit maintenant le contexte pour produire le code source dans le workspace dédié.', 'implementation_complete', 'OpenHands')
         await publish_project_event(project_id, {
             'type': 'implementation_complete',
-            'message': 'Phase applicative terminée. Repo compatible docker_manager prêt.',
+            'message': 'Phase documentaire terminée. OpenHands a été relancé avec le contexte du projet.',
             'pipeline': pipeline,
             'workspace': deliverables[IMPLEMENTATION_WORKSPACE_KEY],
         })
