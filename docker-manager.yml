@@ -3,7 +3,7 @@ kind: auto-detected
 domains:
   frontend: ${FRONTEND_DOMAIN}
   api: ${API_DOMAIN}
-  openhands: ${OPENHANDS_DOMAIN}
+  ide: ${IDE_DOMAIN}
   db_admin: db-sefako-ai-studio.it-sefako.com
 env_files:
 - path: .env
@@ -23,9 +23,9 @@ services:
     port: 3000
     extra_networks:
       - default
-  openhands:
+  ide:
     public: true
-    domain: openhands
-    port: 8000
+    domain: ide
+    port: 8080
     extra_networks:
       - default

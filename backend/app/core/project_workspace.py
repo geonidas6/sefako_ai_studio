@@ -24,7 +24,7 @@ PIPELINE_PHASES = [
     ("admin_approval", "Validation admin"),
     ("technical_design", "Conception technique"),
     ("documentation_pack", "Pack documentaire"),
-    ("openhands_bootstrap", "Handoff OpenHands"),
+    ("editor_bootstrap", "Préparation de l'éditeur"),
     ("requirements_coverage", "Couverture du CDC"),
     ("automated_validation", "Tests et validations"),
     ("delivery_review", "Revue de livraison"),
@@ -864,7 +864,7 @@ def _documentation_specs(
         ("docs/global_environment.md", _global_environment(project_title, project_id, stack)),
         ("docs/implementation_plan.md", _implementation_plan(project_title, input_text, deliverables)),
         ("docs/requirements_matrix.md", _requirements_matrix(project_title, input_text, deliverables, stack)),
-        ("docs/openhands_handoff.md", _openhands_handoff(project_title, project_id, input_text, deliverables, stack)),
+        ("docs/editor_handoff.md", _editor_handoff(project_title, project_id, input_text, deliverables, stack)),
         (".aia/workspace-policy.json", _workspace_policy(str(Path(workspace_root).resolve() / f"{slug}_{project_id}"))),
     ]
 
@@ -874,12 +874,12 @@ def _stack_decision(project_title: str, input_text: str, stack: dict[str, str]) 
     frontend_decision = (
         "Aucun dossier `frontend/` n'est requis par les agents."
         if layout == "monolithique"
-        else "OpenHands décidera de la présence d'un dossier `frontend/` et le créera uniquement si le stack le justifie."
+        else "L'éditeur web décidera de la présence d'un dossier `frontend/` et le créera uniquement si le stack le justifie."
     )
     backend_decision = (
         "Aucun dossier `backend/` n'est requis par les agents."
         if layout == "monolithique"
-        else "OpenHands décidera de la présence d'un dossier `backend/` et le créera uniquement si le stack le justifie."
+        else "L'éditeur web décidera de la présence d'un dossier `backend/` et le créera uniquement si le stack le justifie."
     )
     return f"""# Décision de stack
 
@@ -899,7 +899,7 @@ def _stack_decision(project_title: str, input_text: str, stack: dict[str, str]) 
 ## Décision de structure
 - layout retenu: `{layout}`
 - génération source par les agents: `non`
-- génération source par OpenHands: `oui`
+- génération source par l'éditeur web: `oui`
 
 ## Conséquence sur le dépôt
 - {frontend_decision}
@@ -907,7 +907,7 @@ def _stack_decision(project_title: str, input_text: str, stack: dict[str, str]) 
 
 ## Règle de pilotage
 Les agents du studio produisent uniquement les documents de cadrage.
-OpenHands prend ensuite la main pour créer la structure de code source la plus adaptée au stack validé.
+L'éditeur web prend ensuite le relais pour créer la structure de code source la plus adaptée au stack validé.
 """
 
 
@@ -919,7 +919,7 @@ def _global_environment(project_title: str, project_id: str, stack: dict[str, st
 - Project ID: `{project_id}`
 
 ## Rôle de ce document
-Ce fichier sert de contrat d'environnement global pour OpenHands.
+Ce fichier sert de contrat d'environnement global pour l'éditeur web.
 Il doit être lu avant toute modification de code.
 
 ## Contraintes obligatoires
@@ -964,7 +964,7 @@ Remplace `app` par le nom réel du service applicatif si nécessaire.
 """
 
 
-def _openhands_handoff(
+def _editor_handoff(
     project_title: str,
     project_id: str,
     input_text: str,
@@ -973,7 +973,7 @@ def _openhands_handoff(
 ) -> str:
     docs = [
         "docs/global_environment.md",
-        "docs/openhands_handoff.md",
+        "docs/editor_handoff.md",
         "README.md",
         "docs/cdc.md",
         "docs/mcd.md",
@@ -984,20 +984,20 @@ def _openhands_handoff(
         "docs/implementation_plan.md",
         "docs/requirements_matrix.md",
     ]
-    return f"""# Handoff OpenHands
+    return f"""# Handoff éditeur
 
 ## Contexte
 - Projet: {project_title}
 - Project ID: `{project_id}`
 - Mode opératoire: les agents du studio ne produisent que les documents Markdown.
-- Responsabilité OpenHands: générer le code source réel, les fichiers de build, les routes, les composants et la structure finale du dépôt.
+- Responsabilité de l'éditeur: générer le code source réel, les fichiers de build, les routes, les composants et la structure finale du dépôt.
 
 ## Instructions de démarrage
 1. Lire les documents du dossier `docs/` listés ci-dessous.
 2. Interpréter le stack détecté et confirmer s'il faut un frontend et un backend séparés.
 3. Si le stack est monolithique, garder la structure source à la racine du projet.
 4. Si le stack nécessite une séparation, créer uniquement la séparation utile, pas de structure artificielle.
-5. Générer le code source dans le workspace OpenHands, pas dans les agents du studio.
+5. Générer le code source dans le workspace de l'éditeur, pas dans les agents du studio.
 6. Commencer par une conversation canonique du projet et conserver le contexte des documents fournis.
 
 ## Documents de référence
@@ -1407,14 +1407,14 @@ def _requirements_matrix(project_title: str, input_text: str, deliverables: dict
     ]
     for index, requirement in enumerate(requirements, 1):
         lowered = requirement.lower()
-        refs = ["docs/cdc.md", "docs/stack_decision.md", "docs/openhands_handoff.md"]
+        refs = ["docs/cdc.md", "docs/stack_decision.md", "docs/editor_handoff.md"]
         if any(word in lowered for word in ["api", "backend", "base", "donnée", "donnee", "auth", "crud", "laravel", "fastapi"]):
-            refs.append("docs/openhands_handoff.md")
+            refs.append("docs/editor_handoff.md")
         if any(word in lowered for word in ["interface", "utilisateur", "page", "mobile", "frontend", "dashboard", "écran", "ecran"]):
             refs.append("docs/stack_decision.md")
         if any(word in lowered for word in ["docker", "déploiement", "deploiement", "traefik", "env"]):
-            refs.extend(["docs/openhands_handoff.md", "README.md"])
-        coverage = "Tracé dans les documents de cadrage et le handoff OpenHands. Le code source est délégué à OpenHands."
+            refs.extend(["docs/editor_handoff.md", "README.md"])
+        coverage = "Tracé dans les documents de cadrage et le handoff éditeur. Le code source est délégué à l'éditeur web."
         status = "couvert" if len(refs) > 2 else "à préciser"
         rows.append(f"| {index} | {requirement.replace('|', '/')} | {coverage} | {', '.join(dict.fromkeys(refs))} | {status} |")
     rows.extend([
@@ -1424,10 +1424,10 @@ def _requirements_matrix(project_title: str, input_text: str, deliverables: dict
         f"- frontend demandé: `{stack.get('frontend')}`",
         f"- backend généré par agents: `non`",
         f"- frontend généré par agents: `non`",
-        f"- backend confié à: `OpenHands`",
-        f"- frontend confié à: `OpenHands`",
+        f"- backend confié à: `éditeur web`",
+        f"- frontend confié à: `éditeur web`",
         "",
-        "Cette matrice sert de contrat de vérification pour le cadrage et le handoff OpenHands.",
+        "Cette matrice sert de contrat de vérification pour le cadrage et le handoff éditeur.",
     ])
     return "\n".join(rows) + "\n"
 
@@ -1480,20 +1480,20 @@ def validate_workspace_delivery(
         "docs/global_environment.md",
         "docs/implementation_plan.md",
         "docs/requirements_matrix.md",
-        "docs/openhands_handoff.md",
+        "docs/editor_handoff.md",
         ".aia/workspace-policy.json",
     ]
     missing_files = [relative for relative in required_files if not (base / relative).exists()]
 
     readme = (base / "README.md").read_text(errors="ignore") if (base / "README.md").exists() else ""
     stack_decision = (base / "docs/stack_decision.md").read_text(errors="ignore") if (base / "docs/stack_decision.md").exists() else ""
-    handoff = (base / "docs/openhands_handoff.md").read_text(errors="ignore") if (base / "docs/openhands_handoff.md").exists() else ""
+    handoff = (base / "docs/editor_handoff.md").read_text(errors="ignore") if (base / "docs/editor_handoff.md").exists() else ""
 
     checks = [
         {"key": "required_files", "label": "Documents minimum du repo présents", "ok": not missing_files},
-        {"key": "readme_mentions_openhands", "label": "README documente le passage de relais à OpenHands", "ok": "OpenHands" in readme and "Markdown" in readme},
+        {"key": "readme_mentions_editor", "label": "README documente le passage de relais à l'éditeur", "ok": "éditeur" in readme.lower() and "Markdown" in readme},
         {"key": "stack_decision_present", "label": "Décision de stack documentée", "ok": "Décision de stack" in stack_decision and stack.get("backend") in stack_decision},
-        {"key": "openhands_handoff_present", "label": "Handoff OpenHands documenté", "ok": "Handoff OpenHands" in handoff and "générer le code source" in handoff},
+        {"key": "editor_handoff_present", "label": "Handoff éditeur documenté", "ok": "Handoff éditeur" in handoff and "générer le code source" in handoff},
         {"key": "workspace_guard", "label": "Politique de confinement présente", "ok": (base / ".aia/workspace-policy.json").exists()},
     ]
     success = all(check["ok"] for check in checks)
@@ -1582,7 +1582,7 @@ def _readme(project_title: str, project_id: str, deliverables: dict[str, Any], w
 Project ID: `{project_id}`
 
 Ce workspace est un espace de cadrage documentaire pour AIA Studio.
-Les agents du studio produisent les documents Markdown, puis OpenHands prend le relais pour générer le code source.
+Les agents du studio produisent les documents Markdown, puis l'éditeur web prend le relais pour générer le code source.
 
 ## Stack détectée
 - backend demandé: `{stack.get('backend')}`
@@ -1593,13 +1593,13 @@ Les agents du studio produisent les documents Markdown, puis OpenHands prend le 
 
 ## Décision de livraison
 - code source généré par les agents: `non`
-- code source généré par OpenHands: `oui`
-- structure du dépôt décidée par le couple cadrage + OpenHands
+- code source généré par l'éditeur web: `oui`
+- structure du dépôt décidée par le couple cadrage + éditeur web
 
 ## Règles de travail
 - racine de génération: `{workspace_root}`
 - les agents n'écrivent que des documents Markdown et les garde-fous internes
-- OpenHands reçoit ensuite le contexte et produit le dépôt exécutable
+- l'éditeur web reçoit ensuite le contexte et produit le dépôt exécutable
 - aucun accès direct à `docker_manager`, `traefik_master` ou aux autres projets
 
 ## Livrables d'entrée

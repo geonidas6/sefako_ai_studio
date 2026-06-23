@@ -41,15 +41,12 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      OPENHANDS_INTERNAL_URL: ${OPENHANDS_INTERNAL_URL:-http://openhands:8000}
-      OPENHANDS_AGENT_SERVER_URL: ${OPENHANDS_AGENT_SERVER_URL:-http://openhands:18000}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000","https://sefako-ai-studio.it-sefako.com"]}
-      OPENHANDS_PUBLIC_URL: ${OPENHANDS_PUBLIC_URL:-https://open-hand-sefako-ai-studio.it-sefako.com}
+      IDE_PUBLIC_URL: ${IDE_PUBLIC_URL:-https://ide.it-sefako.com}
       DEBUG: ${DEBUG:-false}
     volumes:
     - projects_data:/projects
@@ -61,8 +58,7 @@ services:
         condition: service_healthy
     labels:
     - traefik.enable=true
-    - traefik.http.routers.sefako-ai-studio-backend.rule=Host(`backend.${DOMAINE}`)
-      || (Host(`${DOMAINE}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`)))
+    - traefik.http.routers.sefako-ai-studio-backend.rule=Host(`${API_DOMAIN}`)
     - traefik.http.routers.sefako-ai-studio-backend.priority=100
     - traefik.http.routers.sefako-ai-studio-backend.entrypoints=websecure
     - traefik.http.routers.sefako-ai-studio-backend.tls.certresolver=myresolver
@@ -78,10 +74,7 @@ services:
       args:
         BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
         NEXT_PUBLIC_API_DOMAIN: ${API_DOMAIN:-api-sefako-ai-studio.it-sefako.com}
-        OPENHANDS_INTERNAL_URL: ${OPENHANDS_INTERNAL_URL:-http://openhands:8000}
-        OPENHANDS_AGENT_SERVER_URL: ${OPENHANDS_AGENT_SERVER_URL:-http://openhands:18000}
-        NEXT_PUBLIC_OPENHANDS_BASE_URL: ${OPENHANDS_BASE_URL:-/openhands}
-        NEXT_PUBLIC_OPENHANDS_PUBLIC_URL: ${OPENHANDS_PUBLIC_URL:-https://open-hand-sefako-ai-studio.it-sefako.com}
+        NEXT_PUBLIC_IDE_PUBLIC_URL: ${IDE_PUBLIC_URL:-https://ide.it-sefako.com}
     restart: unless-stopped
     healthcheck:
       test:
@@ -97,10 +90,7 @@ services:
     environment:
       BACKEND_URL: ${BACKEND_URL:-http://backend:8000}
       NEXT_PUBLIC_API_DOMAIN: ${API_DOMAIN:-api-sefako-ai-studio.it-sefako.com}
-      OPENHANDS_INTERNAL_URL: ${OPENHANDS_INTERNAL_URL:-http://openhands:8000}
-      OPENHANDS_AGENT_SERVER_URL: ${OPENHANDS_AGENT_SERVER_URL:-http://openhands:18000}
-      NEXT_PUBLIC_OPENHANDS_BASE_URL: ${OPENHANDS_BASE_URL:-/openhands}
-      NEXT_PUBLIC_OPENHANDS_PUBLIC_URL: ${OPENHANDS_PUBLIC_URL:-https://open-hand-sefako-ai-studio.it-sefako.com}
+      NEXT_PUBLIC_IDE_PUBLIC_URL: ${IDE_PUBLIC_URL:-https://ide.it-sefako.com}
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: 1
     expose:
@@ -109,7 +99,7 @@ services:
     - backend
     labels:
     - traefik.enable=true
-    - traefik.http.routers.sefako-ai-studio-frontend.rule=Host(`${DOMAINE}`)
+    - traefik.http.routers.sefako-ai-studio-frontend.rule=Host(`${FRONTEND_DOMAIN}`)
     - traefik.http.routers.sefako-ai-studio-frontend.priority=1
     - traefik.http.routers.sefako-ai-studio-frontend.entrypoints=websecure
     - traefik.http.routers.sefako-ai-studio-frontend.tls.certresolver=myresolver
@@ -119,20 +109,26 @@ services:
     networks:
     - default
     - proxy_net
-  openhands:
-    image: ghcr.io/openhands/agent-canvas:1.0.0-rc.11
+  ide:
+    build:
+      context: ./ide
     restart: unless-stopped
-    ports:
-    - 127.0.0.1:8000:8000
+    environment:
+      PASSWORD: ${CODE_SERVER_PASSWORD:-change-this-code-server-password}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TZ: ${TZ:-Africa/Lome}
     volumes:
     - projects_data:/projects
-    - openhands_state:/home/openhands/.openhands
+    - ide_data:/home/coder/.local/share/code-server
+    - ide_config:/home/coder/.config/code-server
+    expose:
+    - '8080'
     labels:
     - traefik.enable=true
-    - traefik.http.routers.sefako-ai-studio-openhands.rule=Host(`openhands.${DOMAINE}`)
-    - traefik.http.routers.sefako-ai-studio-openhands.entrypoints=websecure
-    - traefik.http.routers.sefako-ai-studio-openhands.tls.certresolver=myresolver
-    - traefik.http.services.sefako-ai-studio-openhands.loadbalancer.server.port=8000
+    - traefik.http.routers.sefako-ai-studio-ide.rule=Host(`${IDE_DOMAIN}`)
+    - traefik.http.routers.sefako-ai-studio-ide.entrypoints=websecure
+    - traefik.http.routers.sefako-ai-studio-ide.tls.certresolver=myresolver
+    - traefik.http.services.sefako-ai-studio-ide.loadbalancer.server.port=8080
     - traefik.docker.network=proxy_net
     env_file: .env
     networks:
@@ -142,7 +138,8 @@ volumes:
   postgres_data: null
   qwen_config: null
   projects_data: null
-  openhands_state: null
+  ide_data: null
+  ide_config: null
 networks:
   proxy_net:
     external: true

@@ -48,8 +48,6 @@ docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-com
 
 docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml up -d --force-recreate backend
 
-docker compose -f docker-compose.yml -f docker-compose.traefik.yml -f docker-compose.dev.yml up -d --force-recreate openhands
-
 **Mode prod**
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.traefik.yml up -d --build

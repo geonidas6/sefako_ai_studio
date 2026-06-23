@@ -365,15 +365,17 @@ def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue, cancel_event:
         )
         configs = {cfg.provider: cfg for cfg in result.scalars().all()}
         try:
-            configured = int((configs.get("workflow_debate_rounds").value if configs.get("workflow_debate_rounds") else None) or 1)
+            configured_raw = configs.get("workflow_debate_rounds").value if configs.get("workflow_debate_rounds") else None
+            configured = int(1 if configured_raw is None else configured_raw)
         except (TypeError, ValueError):
             configured = 1
         try:
-            json_retries = int((configs.get("workflow_final_json_retry_count").value if configs.get("workflow_final_json_retry_count") else None) or 2)
+            retries_raw = configs.get("workflow_final_json_retry_count").value if configs.get("workflow_final_json_retry_count") else None
+            json_retries = int(2 if retries_raw is None else retries_raw)
         except (TypeError, ValueError):
             json_retries = 2
         workflow_settings_cache = {
-            "debate_rounds": max(1, min(configured, 3)),
+            "debate_rounds": max(0, min(configured, 3)),
             "final_json_retry_count": max(0, min(json_retries, 5)),
         }
         return workflow_settings_cache["debate_rounds"]

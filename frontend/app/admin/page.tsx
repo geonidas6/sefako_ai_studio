@@ -110,6 +110,8 @@ const providerKeyLinks: Record<string, string> = {
   gemini: 'https://aistudio.google.com/app/apikey',
   anthropic: 'https://console.anthropic.com/settings/keys',
   openai: 'https://platform.openai.com/api-keys',
+  openrouter: 'https://openrouter.ai/docs/quickstart',
+  nvidia: 'https://build.nvidia.com/',
   grok: 'https://console.x.ai/',
   groq: 'https://console.groq.com/keys',
   mistral: 'https://console.mistral.ai/api-keys',
@@ -795,17 +797,17 @@ export default function AdminDashboard() {
               <div className="mt-3 flex items-center gap-3">
                 <Input
                   type="number"
-                  min={1}
+                  min={0}
                   max={workflowSettings.max_debate_rounds || 3}
                   value={workflowSettings.debate_rounds}
                   onChange={(event) => {
                     const parsed = Number.parseInt(event.target.value, 10);
-                    const safe = Number.isFinite(parsed) ? Math.max(1, Math.min(parsed, workflowSettings.max_debate_rounds || 3)) : 1;
+                    const safe = Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, workflowSettings.max_debate_rounds || 3)) : 0;
                     setWorkflowSettings({ ...workflowSettings, debate_rounds: safe });
                   }}
                   className="h-11 max-w-28 font-mono text-lg font-bold"
                 />
-                <span className="text-xs text-muted-foreground">1 à {workflowSettings.max_debate_rounds || 3}</span>
+                <span className="text-xs text-muted-foreground">0 à {workflowSettings.max_debate_rounds || 3}</span>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">Configurable : les équipes se challengent avant l'arbitrage.</p>
             </div>
@@ -859,7 +861,7 @@ export default function AdminDashboard() {
 
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 rounded-xl border border-border/60 bg-background/40 p-4">
             <p className="text-xs text-muted-foreground leading-relaxed max-w-3xl">
-              Recommandation actuelle : 1 round de débat pour limiter les coûts et éviter les boucles, avec un timeout LLM entre 120 et 240 secondes selon la qualité du provider. Les checkpoints permettent de reprendre sans tout régénérer.
+              Recommandation actuelle : 0 à 1 round de débat pour limiter les coûts et éviter les boucles, avec un timeout LLM entre 120 et 240 secondes selon la qualité du provider. Les checkpoints permettent de reprendre sans tout régénérer.
             </p>
             <Button onClick={handleSaveWorkflowSettings} disabled={savingWorkflowSettings} className="h-10 shrink-0">
               {savingWorkflowSettings ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}

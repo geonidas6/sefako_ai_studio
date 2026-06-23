@@ -138,10 +138,10 @@ QWEN_SETTINGS_FILE = QWEN_CONFIG_DIR / "settings.json"
 
 def clamp_debate_rounds(value: int | str | None) -> int:
     try:
-        parsed = int(value or 1)
+        parsed = int(1 if value is None else value)
     except (TypeError, ValueError):
         parsed = 1
-    return max(1, min(parsed, 3))
+    return max(0, min(parsed, 3))
 
 
 def clamp_llm_timeout_seconds(value: int | str | None) -> int:

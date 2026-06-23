@@ -20,7 +20,6 @@ from app.core.project_workspace import (
     validate_workspace_delivery,
 )
 from app.core.workflow_runner import publish_project_event
-from app.core.openhands_bridge import ensure_project_conversation
 from app.db.database import AsyncSessionLocal
 from app.models.project import Project
 from app.core.llm_router import LLMRouter
@@ -32,7 +31,7 @@ IMPLEMENTATION_LOCKS: dict[str, asyncio.Lock] = {}
 PHASES = [
     ('technical_design', 'Conception technique'),
     ('documentation_pack', 'Pack documentaire'),
-    ('openhands_bootstrap', 'Handoff OpenHands'),
+    ('editor_bootstrap', "Préparation de l'éditeur"),
     ('requirements_coverage', 'Couverture du CDC'),
     ('automated_validation', 'Validation documentaire'),
     ('delivery_review', 'Revue de livraison'),
@@ -168,7 +167,7 @@ async def start_implementation_pipeline(project_id: str) -> dict[str, Any]:
             input_text = project.input_text
             project_title = project.title
 
-        await _publish_pipeline(project_id, pipeline, 'Phase lancée. Les employés préparent le pack documentaire et le relais OpenHands.')
+        await _publish_pipeline(project_id, pipeline, "Phase lancée. Les employés préparent le pack documentaire et l'ouverture dans l'éditeur web.")
 
         async def runner() -> None:
             try:
@@ -227,29 +226,17 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
 
         pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je consolide le cadrage Markdown: CDC, MCD, architecture, roadmap, matrice et handoff OpenHands.", 'documentation_pack', 'docs/openhands_handoff.md')
+        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je consolide le cadrage Markdown: CDC, MCD, architecture, roadmap, matrice et handoff éditeur.", 'documentation_pack', 'docs/editor_handoff.md')
         await _publish_pipeline(project_id, pipeline, 'Pack documentaire préparé.')
         pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
 
-        pipeline = set_pipeline_phase(pipeline, 'openhands_bootstrap', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
+        pipeline = set_pipeline_phase(pipeline, 'editor_bootstrap', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        openhands_thread = None
-        try:
-            openhands_thread = await ensure_project_conversation(
-                project_id,
-                project_title,
-                Path(str(workspace['project_dir'])),
-                brief=effective_input_text,
-                deliverables=deliverables,
-            )
-            deliverables['openhands_conversation'] = openhands_thread
-            await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], 'Le contexte Markdown a été transmis à OpenHands pour générer le code source.', 'openhands_bootstrap', 'OpenHands')
-            await _publish_pipeline(project_id, pipeline, 'OpenHands a été initialisé avec le contexte du projet.')
-            pipeline = set_pipeline_phase(pipeline, 'openhands_bootstrap', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
-            deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        except Exception as exc:
-            await _publish_pipeline(project_id, pipeline, f'OpenHands bootstrap en erreur: {exc}')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Le contexte Markdown est prêt et le dossier projet peut être ouvert dans l'éditeur web.", 'editor_bootstrap', 'éditeur web')
+        await _publish_pipeline(project_id, pipeline, "Le workspace est prêt pour l'édition dans l'IDE web.")
+        pipeline = set_pipeline_phase(pipeline, 'editor_bootstrap', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
+        deliverables = await _save_pipeline(project_id, pipeline, deliverables)
 
         pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
@@ -274,7 +261,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
 
         pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture documentaire, validation et handoff OpenHands.", 'delivery_review', 'docs/delivery_review.md')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture documentaire, validation et handoff éditeur.", 'delivery_review', 'docs/delivery_review.md')
         pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'completed', overall_status='completed', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [], last_error=None)
 
         deliverables[IMPLEMENTATION_WORKSPACE_KEY] = {
@@ -282,7 +269,6 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
             'files': workspace.get('files') or [],
             'generated_at': workspace.get('generated_at'),
             'repo_name': workspace.get('repo_name'),
-            'openhands_conversation': openhands_thread,
         }
         deliverables[IMPLEMENTATION_PIPELINE_KEY] = pipeline
         deliverables['implementation_validation'] = validation
@@ -293,10 +279,10 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
                 project.final_deliverables = deliverables
                 await db.commit()
 
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], 'Le cadrage est prêt. OpenHands reçoit maintenant le contexte pour produire le code source dans le workspace dédié.', 'implementation_complete', 'OpenHands')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Le cadrage est prêt. L'éditeur web peut maintenant ouvrir le workspace dédié pour produire le code source.", 'implementation_complete', 'éditeur web')
         await publish_project_event(project_id, {
             'type': 'implementation_complete',
-            'message': 'Phase documentaire terminée. OpenHands a été relancé avec le contexte du projet.',
+            'message': "Phase documentaire terminée. Le workspace est prêt pour l'éditeur web.",
             'pipeline': pipeline,
             'workspace': deliverables[IMPLEMENTATION_WORKSPACE_KEY],
         })

@@ -844,18 +844,18 @@ export default function ProjectDashboard() {
       default: return 'bg-muted text-muted-foreground border-border';
     }
   })();
-  const openhandsPipelineStatus = String(implementationPipeline?.overall_status || implementationPipeline?.status || '').toLowerCase();
-  const openhandsStatusLabel = (() => {
-    switch (openhandsPipelineStatus) {
-      case 'completed': return 'OpenHands terminé';
-      case 'running': return 'OpenHands en cours';
-      case 'awaiting_admin_approval': return 'OpenHands en attente';
-      case 'failed': return 'OpenHands en erreur';
-      default: return workspaceInfo ? 'OpenHands prêt' : 'OpenHands non lancé';
+  const editorPipelineStatus = String(implementationPipeline?.overall_status || implementationPipeline?.status || '').toLowerCase();
+  const editorStatusLabel = (() => {
+    switch (editorPipelineStatus) {
+      case 'completed': return 'Éditeur prêt';
+      case 'running': return 'Préparation de l’éditeur';
+      case 'awaiting_admin_approval': return 'En attente';
+      case 'failed': return 'Éditeur en erreur';
+      default: return workspaceInfo ? 'Workspace prêt' : 'Workspace non prêt';
     }
   })();
-  const openhandsStatusTone = (() => {
-    switch (openhandsPipelineStatus) {
+  const editorStatusTone = (() => {
+    switch (editorPipelineStatus) {
       case 'completed': return 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20';
       case 'running': return 'bg-primary/10 text-primary border-primary/20 animate-pulse';
       case 'failed': return 'bg-destructive/10 text-destructive border-destructive/20';
@@ -1109,7 +1109,7 @@ export default function ProjectDashboard() {
                     <>
                       <Button asChild type="button" variant="outline" size="sm" className="gap-2">
                         <Link href={`/projects/${projectId}/workspace`}>
-                          <FolderTree className="h-3.5 w-3.5" /> Ouvrir OpenHands
+                          <FolderTree className="h-3.5 w-3.5" /> Ouvrir l'éditeur
                         </Link>
                       </Button>
                       <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadWorkspace}>
@@ -1228,10 +1228,10 @@ export default function ProjectDashboard() {
                   <span
                     className={cn(
                       'text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-widest border',
-                      openhandsStatusTone
+                      editorStatusTone
                     )}
                   >
-                    {openhandsStatusLabel}
+                    {editorStatusLabel}
                   </span>
                 </div>
                 <p className="text-sm text-muted-foreground line-clamp-1 max-w-2xl">{project.input_text}</p>
@@ -1249,7 +1249,7 @@ export default function ProjectDashboard() {
                       <Button asChild variant="outline" className="gap-2">
                         <Link href={`/projects/${projectId}/workspace`}>
                           <FolderTree className="h-4 w-4" />
-                          Ouvrir OpenHands
+                          Ouvrir l'éditeur
                         </Link>
                       </Button>
                     )}
@@ -1392,7 +1392,7 @@ export default function ProjectDashboard() {
               <div className="flex items-center justify-between border-b border-border/60 p-5">
                 <div>
                   <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-primary">Projet live</p>
-                  <h2 className="mt-1 text-xl font-bold">Contexte OpenHands</h2>
+                  <h2 className="mt-1 text-xl font-bold">Contexte de l'éditeur</h2>
                 </div>
                 <Button variant="ghost" size="icon" onClick={() => setContextPanelOpen(false)}>
                   <X className="h-5 w-5" />
@@ -1407,7 +1407,7 @@ export default function ProjectDashboard() {
                       Inputs & données
                     </CardTitle>
                     <CardDescription>
-                      Le brief initial et le contexte projet transmis à OpenHands.
+                      Le brief initial et le contexte projet transmis au workspace de l'éditeur.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-3">
@@ -1417,7 +1417,7 @@ export default function ProjectDashboard() {
                     </div>
                     <div className="rounded-xl border border-primary/15 bg-primary/5 p-4 text-xs leading-relaxed text-muted-foreground">
                       <Sparkles className="mb-2 h-4 w-4 text-primary" />
-                      Les messages envoyés depuis cette page sont injectés dans le contexte réel du projet et peuvent relancer OpenHands.
+                      Les messages envoyés depuis cette page sont injectés dans le contexte réel du projet et restent visibles dans le workspace.
                     </div>
                     {workspaceInfo && (
                       <div className="space-y-2 rounded-xl border border-border/60 bg-background/60 p-4 text-xs text-muted-foreground">
@@ -1610,4 +1610,3 @@ export default function ProjectDashboard() {
   );
 
 }
-

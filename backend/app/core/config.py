@@ -29,13 +29,10 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    openrouter_api_key: str = ""
+    nvidia_api_key: str = ""
     mistral_api_key: str = ""
     qwen_api_key: str = ""
-
-    # Optional local OpenHands bridge
-    openhands_internal_url: str = ""
-    openhands_agent_server_url: str = "http://openhands:18000"
-    openhands_public_url: str = ""
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000"]

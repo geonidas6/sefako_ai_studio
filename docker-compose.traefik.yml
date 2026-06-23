@@ -22,13 +22,13 @@ services:
     networks:
       - proxy_net
 
-  openhands:
+  ide:
     labels:
       traefik.enable: 'true'
-      traefik.http.routers.sefako-ai-studio-openhands.rule: Host(`open-hand-sefako-ai-studio.it-sefako.com`)
-      traefik.http.routers.sefako-ai-studio-openhands.entrypoints: websecure
-      traefik.http.routers.sefako-ai-studio-openhands.tls.certresolver: myresolver
-      traefik.http.services.sefako-ai-studio-openhands.loadbalancer.server.port: '8000'
+      traefik.http.routers.sefako-ai-studio-ide.rule: Host(`ide.it-sefako.com`)
+      traefik.http.routers.sefako-ai-studio-ide.entrypoints: websecure
+      traefik.http.routers.sefako-ai-studio-ide.tls.certresolver: myresolver
+      traefik.http.services.sefako-ai-studio-ide.loadbalancer.server.port: '8080'
       traefik.docker.network: proxy_net
     networks:
       - proxy_net

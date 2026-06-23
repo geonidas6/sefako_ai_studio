@@ -57,8 +57,14 @@ def decrypt_api_key(encrypted_key: str) -> str:
 PROVIDERS = {
     "gemini": {
         "name": "Google Gemini",
-        "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro"],
-        "default_model": "gemini-2.5-flash",
+        "models": [
+            "gemini-3.5-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-1.5-pro",
+        ],
+        "default_model": "gemini-3.5-flash",
     },
     "anthropic": {
         "name": "Anthropic Claude",
@@ -69,6 +75,26 @@ PROVIDERS = {
         "name": "OpenAI GPT",
         "models": ["gpt-4o", "gpt-4o-mini", "o3-mini"],
         "default_model": "gpt-4o",
+    },
+    "openrouter": {
+        "name": "OpenRouter",
+        "models": [
+            "openai/gpt-oss-20b:free",
+            "openai/gpt-oss-120b:free",
+            "google/gemma-3-27b-it:free",
+            "meta-llama/llama-3.1-8b-instruct:free",
+        ],
+        "default_model": "openai/gpt-oss-20b:free",
+    },
+    "nvidia": {
+        "name": "NVIDIA NIM",
+        "models": [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "deepseek-ai/deepseek-v4-pro",
+            "stepfun-ai/step-3.7-flash",
+            "zai/glm-5.1",
+        ],
+        "default_model": "nvidia/nemotron-3-ultra-550b-a55b",
     },
     "grok": {
         "name": "xAI Grok",
@@ -116,6 +142,8 @@ DEFAULT_REQUESTS_PER_MINUTE = {
     "gemini": 15,
     "anthropic": 5,
     "openai": 10,
+    "openrouter": 5,
+    "nvidia": 5,
     "grok": 5,
     "groq": 2,
     "mistral": 10,
@@ -375,6 +403,8 @@ class LLMRouter:
                 "gemini": settings.gemini_api_key,
                 "anthropic": settings.anthropic_api_key,
                 "openai": settings.openai_api_key,
+                "openrouter": settings.openrouter_api_key,
+                "nvidia": settings.nvidia_api_key,
                 "grok": settings.grok_api_key,
                 "groq": settings.groq_api_key,
                 "mistral": settings.mistral_api_key,
@@ -481,6 +511,24 @@ class LLMRouter:
         elif provider == "openai":
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(model=model, api_key=api_key, temperature=0.4, max_tokens=1800)
+        elif provider == "openrouter":
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model,
+                api_key=api_key,
+                base_url="https://openrouter.ai/api/v1",
+                temperature=0.4,
+                max_tokens=1800,
+            )
+        elif provider == "nvidia":
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model,
+                api_key=api_key,
+                base_url="https://integrate.api.nvidia.com/v1",
+                temperature=0.4,
+                max_tokens=1800,
+            )
         elif provider == "grok":
             from langchain_openai import ChatOpenAI
             llm = ChatOpenAI(

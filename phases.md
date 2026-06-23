@@ -14,7 +14,7 @@ Dans l’état actuel du projet, ces deux boutons ne font pas la même chose.
   - `docs/stack_decision.md`
   - `docs/implementation_plan.md`
   - `docs/requirements_matrix.md`
-  - `docs/openhands_handoff.md`
+  - `docs/editor_handoff.md`
   - `.aia/workspace-policy.json`
 - En gros, ce bouton prépare le dossier de travail et la documentation de référence.
 - Il ne lance pas encore la génération du code source final.
@@ -24,14 +24,14 @@ Dans l’état actuel du projet, ces deux boutons ne font pas la même chose.
 - Il faut aussi être admin.
 - Il ne fonctionne que si la conception technique a déjà été initialisée.
 - Il démarre la phase applicative, c’est-à-dire le pipeline qui:
-  - prépare la conversation OpenHands du projet,
+  - prépare le workspace technique du projet,
   - transmet le contexte Markdown,
-  - lance le workflow de validation et de suivi,
-  - et laisse OpenHands générer le code source réel.
-- Dans votre configuration actuelle, les agents du studio ne génèrent plus le code source, ils ne produisent que les documents Markdown et le handoff vers OpenHands.
+  - ouvre l'éditeur web sur le dossier du projet,
+  - et laisse l'équipe travailler directement dans le workspace.
+- Dans votre configuration actuelle, les agents du studio produisent les documents Markdown puis le code se fait dans l'éditeur web.
 
 **Résumé simple**
 - `Conception technique` = créer la base documentaire et le workspace du projet.
-- `Phase applicative` = déclencher le vrai passage à l’action avec OpenHands pour produire le code.
+- `Phase applicative` = passer au travail réel dans l'éditeur web sur le dossier du projet.
 
 Si tu veux, je peux aussi te faire un petit schéma “bouton -> endpoint -> effet réel” pour les deux.

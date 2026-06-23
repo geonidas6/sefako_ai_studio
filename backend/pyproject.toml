@@ -23,8 +23,6 @@ dependencies = [
     "pydantic-settings>=2.5.0",
     "httpx>=0.27.0",
     "aiofiles>=24.0.0",
-    "openhands-sdk==1.29.0",
-    "openhands-tools==1.29.0",
     "opentelemetry-instrumentation==0.60b1",
     "opentelemetry-instrumentation-threading==0.60b1",
     "opentelemetry-semantic-conventions==0.60b1",
