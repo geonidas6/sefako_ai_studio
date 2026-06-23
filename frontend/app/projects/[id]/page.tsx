@@ -20,6 +20,7 @@ import {
   Layers,
   Calendar,
   ClipboardList,
+  HelpCircle,
   Send,
   Users,
   Activity,
@@ -33,7 +34,9 @@ import {
   FilePlus2,
   FolderPlus,
   Folder,
-  FileCode2
+  FileCode2,
+  Upload,
+  Copy
 } from 'lucide-react';
 import { api } from '../../../lib/api';
 import { connectProjectWs, WsEvent } from '../../../lib/websocket';
@@ -275,10 +278,15 @@ export default function ProjectDashboard() {
   const [creatingWorkspaceEntry, setCreatingWorkspaceEntry] = useState(false);
   const [newWorkspacePath, setNewWorkspacePath] = useState('');
   const [workspaceMovePath, setWorkspaceMovePath] = useState('');
+  const [workspaceExportCommand, setWorkspaceExportCommand] = useState('');
+  const [loadingWorkspaceExport, setLoadingWorkspaceExport] = useState(false);
 
   const [logs, setLogs] = useState<{ text: string; type?: 'info' | 'success' | 'error' | 'system' }[]>([]);
   const [chatInput, setChatInput] = useState('');
+  const [chatMode, setChatMode] = useState<'question' | 'correction'>('correction');
   const [sendingMessage, setSendingMessage] = useState(false);
+  const [validationDrafts, setValidationDrafts] = useState<Record<string, string>>({});
+  const [submittingValidation, setSubmittingValidation] = useState(false);
   const [conversation, setConversation] = useState<{
     kind?: 'agent' | 'user';
     agent: string;
@@ -309,6 +317,22 @@ export default function ProjectDashboard() {
   useEffect(() => {
     if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
+
+  useEffect(() => {
+    const validationQuestions = project?.final_deliverables?.validation_questions;
+    if (!Array.isArray(validationQuestions) || !validationQuestions.length) return;
+    setValidationDrafts((prev) => {
+      const next = { ...prev };
+      validationQuestions.forEach((item: any) => {
+        const key = String(item?.id || '').trim();
+        if (!key) return;
+        if (typeof next[key] === 'undefined') {
+          next[key] = String(item?.answer || '');
+        }
+      });
+      return next;
+    });
+  }, [project?.final_deliverables?.validation_questions]);
 
   useEffect(() => {
     if (!api.auth.isLoggedIn()) return;
@@ -408,12 +432,20 @@ export default function ProjectDashboard() {
   };
 
   const handleSendMessage = async () => {
-    const content = chatInput.trim();
+    let content = chatInput.trim();
     if (!content) return;
+    if (chatMode === 'question' && !/[?？]\s*$/.test(content)) {
+      content = `${content}?`;
+    }
     setSendingMessage(true);
     try {
       const result = await api.projects.sendMessage(projectId, content);
-      if (result?.restart_triggered) {
+      if (result?.question_answered) {
+        setLogs((prev) => [...prev, {
+          text: 'Question envoyée aux agents. Une réponse apparaît dans le fil de discussion.',
+          type: 'info',
+        }]);
+      } else if (result?.restart_triggered) {
         setWsStatus('running');
         setLogs((prev) => [...prev, {
           text: 'Demande de correction reçue. Une nouvelle passe corrective a été relancée automatiquement depuis les checkpoints déjà produits.',
@@ -470,6 +502,37 @@ export default function ProjectDashboard() {
     }
   };
 
+  const handleSubmitValidationAnswers = async () => {
+    const questions = Array.isArray(project?.final_deliverables?.validation_questions)
+      ? project.final_deliverables.validation_questions
+      : [];
+    const payload = questions
+      .map((item: any) => ({
+        id: String(item?.id || '').trim(),
+        question: String(item?.question || '').trim(),
+        department: String(item?.department || 'orchestrator').trim(),
+        answer: String(validationDrafts[String(item?.id || '')] || '').trim(),
+      }))
+      .filter((item: any) => item.id && item.answer);
+
+    if (!payload.length) {
+      setLogs((prev) => [...prev, { text: 'Ajoute au moins une réponse avant de relancer.', type: 'error' }]);
+      return;
+    }
+
+    setSubmittingValidation(true);
+    try {
+      const updated = await api.projects.submitValidationAnswers(projectId, payload);
+      setProject(updated);
+      setWsStatus('running');
+      setLogs((prev) => [...prev, { text: 'Réponses de validation enregistrées. Reprise automatique de l’analyse.', type: 'success' }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible d’enregistrer les réponses de validation.', type: 'error' }]);
+    } finally {
+      setSubmittingValidation(false);
+    }
+  };
+
   const handleStartTechnicalDesign = async () => {
     if (!isAdminSession) return;
     const needsApproval = generationSettings.require_technical_approval;
@@ -520,6 +583,29 @@ export default function ProjectDashboard() {
       await api.projects.downloadWorkspaceArchive(projectId);
     } catch (err: any) {
       setLogs((prev) => [...prev, { text: err.message || 'Impossible de télécharger le workspace.', type: 'error' }]);
+    }
+  };
+
+  const handlePublishWorkspace = async () => {
+    if (!isAdminSession) return;
+    setLoadingWorkspaceExport(true);
+    try {
+      const data = await api.projects.getWorkspaceHostExportCommand(projectId);
+      const command = String(data?.command || '').trim();
+      setWorkspaceExportCommand(command);
+      if (command && navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(command);
+      }
+      setLogs((prev) => [...prev, {
+        text: command
+          ? `Commande d'export prête pour /opt. Elle a été copiée dans le presse-papiers.`
+          : 'Commande d\'export introuvable.',
+        type: command ? 'success' : 'error',
+      }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible de préparer la publication vers /opt.', type: 'error' }]);
+    } finally {
+      setLoadingWorkspaceExport(false);
     }
   };
 
@@ -729,7 +815,12 @@ export default function ProjectDashboard() {
         }
         break;
       case 'workflow_paused':
-        setLogs((prev) => [...prev, { text: event.message || 'Analyse mise en pause.', type: 'system' }]);
+        setLogs((prev) => [...prev, {
+          text: event.reason === 'validation_required'
+            ? (event.message || 'Le workflow attend vos réponses de validation.')
+            : (event.message || 'Analyse mise en pause.'),
+          type: 'system',
+        }]);
         setWsStatus('paused');
         setRunningAgents({});
         setAgentStatuses((prev) => ({ ...prev, orchestrator: 'En pause' }));
@@ -740,9 +831,19 @@ export default function ProjectDashboard() {
             ...(prev?.final_deliverables || {}),
             ...(event.pipeline ? { implementation_pipeline: event.pipeline } : {}),
             ...(event.workspace ? { implementation_workspace: event.workspace } : {}),
-            error: event.message || 'Analyse mise en pause.',
+            ...(event.reason === 'validation_required' && Array.isArray(event.validation_questions)
+              ? {
+                validation_questions: event.validation_questions,
+                validation_status: 'awaiting_user',
+              }
+              : {
+                error: event.message || 'Analyse mise en pause.',
+              }),
           },
         }));
+        break;
+      case 'validation_answers_saved':
+        setLogs((prev) => [...prev, { text: event.message || 'Réponses de validation enregistrées.', type: 'success' }]);
         break;
       case 'workflow_error':
       case 'error':
@@ -781,6 +882,9 @@ export default function ProjectDashboard() {
 
   const deliverables = project.final_deliverables || {};
   const implementationPipeline = deliverables.implementation_pipeline || null;
+  const validationQuestions = Array.isArray(deliverables.validation_questions)
+    ? deliverables.validation_questions.filter((item: any) => item && typeof item === 'object')
+    : [];
   const workspaceInfo = deliverables.implementation_workspace || (implementationPipeline?.project_dir ? {
     project_dir: implementationPipeline.project_dir,
     root_path: implementationPipeline.root_path || '',
@@ -825,6 +929,7 @@ export default function ProjectDashboard() {
   const hasRound2 = Boolean(critiques.strategy || critiques.ux || critiques.engineering || critiques.devops);
   const round2Complete = Boolean(critiques.strategy && critiques.ux && critiques.engineering && critiques.devops);
   const hasDeliverables = Boolean(deliverables.cdc || deliverables.mcd || deliverables.architecture || deliverables.roadmap);
+  const hasValidationQuestions = validationQuestions.length > 0;
 
   const projectStatusLabel = (() => {
     switch (project.status) {
@@ -983,6 +1088,35 @@ export default function ProjectDashboard() {
               <div ref={logEndRef} />
             </div>
             <div className="border-t border-border/50 bg-card/95 p-4">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setChatMode('question')}
+                  className={cn(
+                    'rounded-full border px-3 py-1.5 text-xs font-semibold transition-all',
+                    chatMode === 'question'
+                      ? 'border-primary/30 bg-primary/10 text-primary'
+                      : 'border-border/60 bg-transparent text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  Poser une question
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChatMode('correction')}
+                  className={cn(
+                    'rounded-full border px-3 py-1.5 text-xs font-semibold transition-all',
+                    chatMode === 'correction'
+                      ? 'border-primary/30 bg-primary/10 text-primary'
+                      : 'border-border/60 bg-transparent text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  Demande de correction
+                </button>
+                <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  {chatMode === 'question' ? 'Réponse directe des agents' : 'Relance du workflow si nécessaire'}
+                </span>
+              </div>
               <div className="flex gap-3">
                 <textarea
                   value={chatInput}
@@ -993,11 +1127,14 @@ export default function ProjectDashboard() {
                       handleSendMessage();
                     }
                   }}
-                  placeholder="Ajouter une précision, contrainte, correction ou nouvelle exigence..."
+                  placeholder={chatMode === 'question'
+                    ? 'Poser une question aux agents...'
+                    : 'Ajouter une précision, contrainte, correction ou nouvelle exigence...'}
                   className="min-h-[44px] max-h-32 flex-1 resize-none rounded-xl border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
                 />
-                <Button onClick={handleSendMessage} disabled={!chatInput.trim() || sendingMessage} className="h-11 shrink-0 px-4">
+                <Button onClick={handleSendMessage} disabled={!chatInput.trim() || sendingMessage} className="h-11 shrink-0 px-4 gap-2">
                   {sendingMessage ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  {chatMode === 'question' ? 'Question' : 'Envoyer'}
                 </Button>
               </div>
               <p className="mt-2 text-[10px] text-muted-foreground">
@@ -1115,9 +1252,26 @@ export default function ProjectDashboard() {
                       <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadWorkspace}>
                         <FolderTree className="h-3.5 w-3.5" /> Télécharger le repo ZIP
                       </Button>
+                      <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handlePublishWorkspace} disabled={loadingWorkspaceExport}>
+                        {loadingWorkspaceExport ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                        Publier vers /opt
+                      </Button>
                     </>
                   )}
                 </div>
+                {workspaceExportCommand && isAdminSession && (
+                  <div className="rounded-xl border border-border/60 bg-background/80 p-3 space-y-2">
+                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+                      <Copy className="h-3.5 w-3.5 text-primary" /> Commande d'export
+                    </div>
+                    <code className="block overflow-x-auto rounded-lg border border-border/50 bg-muted/50 px-3 py-2 text-xs text-foreground">
+                      {workspaceExportCommand}
+                    </code>
+                    <p className="text-[11px] text-muted-foreground">
+                      Lance cette commande depuis le VPS pour copier le workspace du projet dans `/opt`.
+                    </p>
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}
@@ -1146,9 +1300,60 @@ export default function ProjectDashboard() {
             </Card>
           )}
 
-
-
-
+          {hasValidationQuestions && (
+            <Card className="border-primary/20 bg-primary/5">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <HelpCircle className="h-4 w-4 text-primary" /> Questions de validation IA
+                </CardTitle>
+                <CardDescription>
+                  {project.status === 'paused'
+                    ? 'Réponds aux questions ci-dessous pour reprendre automatiquement l’analyse.'
+                    : 'Les agents ont identifié des points à valider avant de figer le cadrage et l’implémentation.'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4 text-sm text-muted-foreground">
+                {validationQuestions.map((item: any, index: number) => (
+                  <div key={item.id || index} className="rounded-lg border border-border/60 bg-background/70 p-4 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-primary">
+                        {index + 1}
+                      </span>
+                      <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-primary">
+                        {String(item.department || 'orchestrator')}
+                      </span>
+                      <span className="rounded-full border border-border/60 bg-muted/60 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                        {String(item.answer_type || 'free_text')}
+                      </span>
+                    </div>
+                    <p className="text-sm font-medium text-foreground">{index + 1}. {String(item.question || '').trim()}</p>
+                    {item.why_it_matters && (
+                      <p className="text-xs leading-relaxed text-muted-foreground">{String(item.why_it_matters)}</p>
+                    )}
+                    {project.status === 'paused' && (
+                      <textarea
+                        value={validationDrafts[String(item.id || '')] || ''}
+                        onChange={(event) => setValidationDrafts((prev) => ({ ...prev, [String(item.id || '')]: event.target.value }))}
+                        placeholder="Écris ta réponse ici..."
+                        className="mt-2 min-h-[96px] w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                      />
+                    )}
+                  </div>
+                ))}
+                {project.status === 'paused' && (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button onClick={handleSubmitValidationAnswers} disabled={submittingValidation} className="gap-2">
+                      {submittingValidation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                      Répondre et reprendre
+                    </Button>
+                    <p className="text-xs text-muted-foreground">
+                      L’analyse reprendra automatiquement juste après l’enregistrement des réponses.
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <Card className="min-h-[600px] border-border/60 shadow-xl">
             <CardHeader className="border-b border-border/40 space-y-3">
@@ -1238,7 +1443,7 @@ export default function ProjectDashboard() {
               </div>
 
               <div className="flex gap-3">
-                {(project.status === 'pending' || project.status === 'failed' || project.status === 'paused') && wsStatus !== 'running' && (
+                {(project.status === 'pending' || project.status === 'failed' || (project.status === 'paused' && !hasValidationQuestions)) && wsStatus !== 'running' && (
                   <Button onClick={handleStart} className="gap-2">
                     <Zap className="h-4 w-4" /> {project.status === 'paused' ? "Reprendre l'analyse" : "Lancer l'Analyse"}
                   </Button>
@@ -1293,7 +1498,7 @@ export default function ProjectDashboard() {
         </header>
 
         <main className="flex-1 max-w-7xl mx-auto px-6 py-8 w-full flex flex-col gap-8">
-          {(project.status === 'failed' || project.status === 'paused') && (
+          {(project.status === 'failed' || (project.status === 'paused' && !hasValidationQuestions)) && (
             <Card className="border-destructive/30 bg-destructive/5">
               <CardHeader className="pb-3">
                 <CardTitle className="text-destructive flex items-center gap-2 text-base">

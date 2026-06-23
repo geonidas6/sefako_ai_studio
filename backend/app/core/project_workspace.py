@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.llm_config import LLMConfig
+from app.models.workflow_event import WorkflowEvent
 from app.core.llm_router import LLMRouter
 
 WORKSPACE_ROOT_PATH_KEY = "workspace_root_path"
@@ -19,6 +20,8 @@ WORKSPACE_REQUIRE_APPROVAL_KEY = "workspace_require_technical_approval"
 DEFAULT_WORKSPACE_ROOT = "/projects"
 IMPLEMENTATION_PIPELINE_KEY = "implementation_pipeline"
 IMPLEMENTATION_WORKSPACE_KEY = "implementation_workspace"
+CODE_SERVER_UID = int(os.getenv("CODE_SERVER_UID", "1000"))
+CODE_SERVER_GID = int(os.getenv("CODE_SERVER_GID", "1000"))
 
 PIPELINE_PHASES = [
     ("admin_approval", "Validation admin"),
@@ -137,10 +140,18 @@ def _write_workspace_file(project_dir: Path, relative_path: str, content: str) -
 
 def _set_workspace_permissions(project_dir: Path) -> None:
     try:
+        os.chown(project_dir, CODE_SERVER_UID, CODE_SERVER_GID)
+    except Exception:
+        pass
+    try:
         project_dir.chmod(0o775)
     except Exception:
         pass
     for path in project_dir.rglob("*"):
+        try:
+            os.chown(path, CODE_SERVER_UID, CODE_SERVER_GID)
+        except Exception:
+            pass
         try:
             if path.is_dir():
                 path.chmod(0o775)
@@ -271,15 +282,52 @@ def _match_stack(source: str, patterns: list[tuple[str, list[str]]], default: st
     return default
 
 
-def detect_application_stack(project_title: str, input_text: str, deliverables: dict[str, Any]) -> dict[str, str]:
+STATIC_ONLY_CONTEXT_PATTERNS = [
+    r"\bonly\s+html\b.*\bcss\b.*\bjs\b",
+    r"\bhtml\b.*\bcss\b.*\bjs\b.*\bonly\b",
+    r"\bhtml\s*/\s*css\s*/\s*js\b.*\bonly\b",
+    r"\bvanilla\s+js\b",
+    r"\bpure\s+html\b.*\bcss\b.*\bjs\b",
+    r"\bsans\s+framework\b",
+    r"\bno\s+framework\b",
+    r"\bwithout\s+framework\b",
+    r"\buniquement\s+html\b.*\bcss\b.*\bjs\b",
+    r"\bjust\s+html\b.*\bcss\b.*\bjs\b",
+]
+
+
+def _looks_like_static_only_request(source: str) -> bool:
+    lowered = source.lower()
+    return any(re.search(pattern, lowered, re.DOTALL) for pattern in STATIC_ONLY_CONTEXT_PATTERNS)
+
+
+def detect_application_stack(
+    project_title: str,
+    input_text: str,
+    deliverables: dict[str, Any],
+    *,
+    extra_context: str = "",
+) -> dict[str, str]:
     source = "\n".join([
         project_title or "",
         input_text or "",
+        extra_context or "",
         str(deliverables.get("cdc") or ""),
         str(deliverables.get("architecture") or ""),
         str(deliverables.get("roadmap") or ""),
         str(deliverables.get("notes_synthese") or ""),
     ]).lower()
+
+    if _looks_like_static_only_request(source):
+        return {
+            "backend": "none",
+            "frontend": "static",
+            "mobile": "none",
+            "database": "none",
+            "languages": "html, css, javascript",
+            "generation_backend": "none",
+            "generation_frontend": "static",
+        }
 
     backend_patterns: list[tuple[str, list[str]]] = [
         ("laravel", [r"\blaravel\b", r"\bphp\b", r"\bsymfony\b", r"\bcodeigniter\b", r"\byii\b", r"\bcakephp\b", r"\bslim\b"]),
@@ -368,6 +416,7 @@ def detect_application_stack(project_title: str, input_text: str, deliverables: 
         "rails": "fastapi",
         "phoenix": "fastapi",
         "kotlin": "fastapi",
+        "none": "none",
     }
     generation_frontend_map = {
         "nextjs": "nextjs",
@@ -398,6 +447,18 @@ def detect_application_stack(project_title: str, input_text: str, deliverables: 
 
 def _project_env_template(slug: str, stack: dict[str, str]) -> str:
     frontend_port = "3000" if stack.get("generation_frontend") == "nextjs" else "80"
+    if stack.get("generation_backend") == "none":
+        return f"""APP_NAME={slug}
+APP_ENV=local
+APP_KEY=change-me
+APP_DEBUG=true
+APP_URL=https://{slug}.example.com
+FRONTEND_DOMAIN={slug}.example.com
+FRONTEND_PORT={frontend_port}
+STACK_BACKEND=none
+STACK_FRONTEND={stack.get('frontend', 'static')}
+STACK_LAYOUT=static-only
+"""
     if stack.get("generation_frontend") == "monolith":
         return f"""APP_NAME={slug}
 APP_ENV=local
@@ -438,6 +499,18 @@ STACK_FRONTEND={stack.get('frontend', 'static')}
 
 def _project_compose_template(slug: str, stack: dict[str, str]) -> str:
     frontend_port = "3000" if stack.get("generation_frontend") == "nextjs" else "80"
+    if stack.get("generation_backend") == "none":
+        return f"""services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    expose:
+      - "{frontend_port}"
+    restart: unless-stopped
+"""
     if stack.get("generation_frontend") == "monolith":
         return f"""services:
   app:
@@ -516,6 +589,24 @@ volumes:
 
 def _project_traefik_template(slug: str, stack: dict[str, str]) -> str:
     frontend_port = "3000" if stack.get("generation_frontend") == "nextjs" else "80"
+    if stack.get("generation_backend") == "none":
+        return f"""services:
+  frontend:
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy_net
+      - traefik.http.routers.{slug}-frontend.rule=Host(`${{FRONTEND_DOMAIN}}`)
+      - traefik.http.routers.{slug}-frontend.entrypoints=websecure
+      - traefik.http.routers.{slug}-frontend.tls=true
+      - traefik.http.routers.{slug}-frontend.tls.certresolver=myresolver
+      - traefik.http.services.{slug}-frontend.loadbalancer.server.port={frontend_port}
+    networks:
+      - proxy_net
+
+networks:
+  proxy_net:
+    external: true
+"""
     if stack.get("generation_frontend") == "monolith":
         return f"""services:
   app:
@@ -851,36 +942,70 @@ def _documentation_specs(
     deliverables: dict[str, Any],
     stack: dict[str, str],
     workspace_root: str,
+    client_context: str = "",
 ) -> list[tuple[str, str]]:
     slug = slugify_project_title(project_title)
     return [
-        ("README.md", _readme(project_title, project_id, deliverables, workspace_root, stack)),
+        ("README.md", _readme(project_title, project_id, deliverables, workspace_root, stack, client_context)),
         ("docs/cdc.md", str(deliverables.get("cdc") or "").strip() or "# CDC\n"),
         ("docs/mcd.md", str(deliverables.get("mcd") or "").strip() or "# MCD\n"),
         ("docs/architecture.md", str(deliverables.get("architecture") or "").strip() or "# Architecture\n"),
         ("docs/roadmap.md", str(deliverables.get("roadmap") or "").strip() or "# Roadmap\n"),
         ("docs/notes_synthese.md", str(deliverables.get("notes_synthese") or "").strip() or "# Notes de synthese\n"),
-        ("docs/stack_decision.md", _stack_decision(project_title, input_text, stack)),
-        ("docs/global_environment.md", _global_environment(project_title, project_id, stack)),
+        ("docs/client_updates.md", _client_updates(project_title, project_id, input_text, deliverables, client_context)),
+        ("docs/stack_decision.md", _stack_decision(project_title, input_text, stack, client_context)),
+        ("docs/global_environment.md", _global_environment(project_title, project_id, stack, client_context)),
         ("docs/implementation_plan.md", _implementation_plan(project_title, input_text, deliverables)),
         ("docs/requirements_matrix.md", _requirements_matrix(project_title, input_text, deliverables, stack)),
-        ("docs/editor_handoff.md", _editor_handoff(project_title, project_id, input_text, deliverables, stack)),
         (".aia/workspace-policy.json", _workspace_policy(str(Path(workspace_root).resolve() / f"{slug}_{project_id}"))),
     ]
 
 
-def _stack_decision(project_title: str, input_text: str, stack: dict[str, str]) -> str:
+def _client_updates(project_title: str, project_id: str, input_text: str, deliverables: dict[str, Any], client_context: str) -> str:
+    lines = [
+        "# Journal des corrections client",
+        "",
+        f"Projet: {project_title}",
+        f"Project ID: `{project_id}`",
+        "",
+        "## Brief initial",
+        input_text.strip()[:1600] or "Aucun brief initial disponible.",
+        "",
+        "## Corrections récentes",
+    ]
+    if client_context.strip():
+        lines.extend(client_context.strip().splitlines())
+    else:
+        lines.append("Aucune correction récente n'a encore été enregistrée.")
+    validation_answers = deliverables.get("validation_answers")
+    if isinstance(validation_answers, list) and validation_answers:
+        lines.extend([
+            "",
+            "## Réponses de validation",
+        ])
+        for index, item in enumerate(validation_answers, start=1):
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or item.get("id") or f"Question {index}").strip()
+            answer = str(item.get("answer") or "").strip()
+            if answer:
+                lines.append(f"{index}. {question} -> {answer}")
+    return "\n".join(lines) + "\n"
+
+
+def _stack_decision(project_title: str, input_text: str, stack: dict[str, str], client_context: str = "") -> str:
     layout = "monolithique" if stack.get("generation_frontend") == "monolith" else "séparé"
     frontend_decision = (
         "Aucun dossier `frontend/` n'est requis par les agents."
         if layout == "monolithique"
         else "L'éditeur web décidera de la présence d'un dossier `frontend/` et le créera uniquement si le stack le justifie."
     )
-    backend_decision = (
-        "Aucun dossier `backend/` n'est requis par les agents."
-        if layout == "monolithique"
-        else "L'éditeur web décidera de la présence d'un dossier `backend/` et le créera uniquement si le stack le justifie."
-    )
+    if stack.get("generation_backend") == "none":
+        backend_decision = "Aucun dossier `backend/` n'est requis par les agents."
+    elif layout == "monolithique":
+        backend_decision = "Aucun dossier `backend/` n'est requis par les agents."
+    else:
+        backend_decision = "L'éditeur web décidera de la présence d'un dossier `backend/` et le créera uniquement si le stack le justifie."
     return f"""# Décision de stack
 
 ## Projet
@@ -888,6 +1013,9 @@ def _stack_decision(project_title: str, input_text: str, stack: dict[str, str]) 
 
 ## Brief de départ
 {input_text.strip()[:1800]}
+
+## Corrections récentes
+{client_context.strip()[:1200] or "Aucune correction récente."}
 
 ## Stack détectée
 - backend: `{stack.get('backend')}`
@@ -911,16 +1039,35 @@ L'éditeur web prend ensuite le relais pour créer la structure de code source l
 """
 
 
-def _global_environment(project_title: str, project_id: str, stack: dict[str, str]) -> str:
-    return f"""# Global Environment
+def _global_environment(project_title: str, project_id: str, stack: dict[str, str], client_context: str = "") -> str:
+    if stack.get("generation_backend") == "none":
+        return f"""# Global Environment
 
 ## Projet
 - Titre: {project_title}
 - Project ID: `{project_id}`
 
 ## Rôle de ce document
-Ce fichier sert de contrat d'environnement global pour l'éditeur web.
-Il doit être lu avant toute modification de code.
+Ce fichier est le contrat d'environnement à suivre par l'agent IA dans VS Code web.
+Il doit être lu avant toute modification de fichier, avant toute création de config, et avant toute génération de code.
+Si une consigne utilisateur contredit un ancien document, la consigne la plus récente prime.
+
+## Source de vérité
+- `README.md`
+- `docs/client_updates.md`
+- `docs/stack_decision.md`
+- `docs/requirements_matrix.md`
+- `docs/global_environment.md`
+
+## Ce que l'agent doit produire
+- `docker-compose.yml`
+- `docker-compose.traefik.yml`
+- `docker-manager.yml`
+- `.env.example`
+- `README.md`
+- les fichiers applicatifs nécessaires au stack validé
+- du code source uniquement dans le dossier du projet
+- aucune sortie hors workspace
 
 ## Contraintes obligatoires
 - Tout doit être exécuté dans Docker.
@@ -928,12 +1075,273 @@ Il doit être lu avant toute modification de code.
 - Vérifier l'état runtime avec des commandes comme `docker compose ps`.
 - Lancer les commandes applicatives dans le conteneur adéquat avec `docker compose exec`.
 - Si le stack n'est pas prêt, ajuster d'abord les fichiers Docker.
+- Si une correction client change le stack, il faut réécrire les fichiers `.md` concernés avant de produire le code final.
+
+## Commandes de contrôle attendues
+- `docker compose ps`
+- `docker compose logs frontend`
+- `docker compose exec frontend nginx -v`
+- `docker compose exec frontend ls -la /usr/share/nginx/html`
+
+## Exemples d'actions attendues pour un projet HTML / CSS / JavaScript
+```bash
+docker compose ps
+docker compose exec frontend ls -la /usr/share/nginx/html
+docker compose exec frontend cat /usr/share/nginx/html/index.html
+docker compose exec frontend cat /usr/share/nginx/html/styles.css
+docker compose exec frontend cat /usr/share/nginx/html/app.js
+```
+
+## Exemples de fichiers à générer
+```text
+docker-compose.yml
+docker-compose.traefik.yml
+docker-manager.yml
+.env.example
+frontend/
+  Dockerfile
+  nginx.conf
+  index.html
+  styles.css
+  app.js
+docs/
+  global_environment.md
+  stack_decision.md
+  client_updates.md
+```
+
+## Ce que doivent contenir les fichiers Docker
+### `docker-compose.yml`
+- la définition des services applicatifs
+- les variables d'environnement
+- les réseaux
+- les volumes si nécessaires
+- les ports internes exposés
+
+### `docker-compose.traefik.yml`
+- les labels `traefik.enable=true`
+- les routeurs pour le domaine public
+- les ports des services
+- `proxy_net` comme réseau partagé
+- `websecure` comme entrypoint pour le HTTPS
+- `tls.certresolver=myresolver` pour l'émission automatique du certificat
+- un exemple concret de règle `Host(...)` avec le domaine réel du projet
+
+### Exemple concret attendu pour `docker-compose.traefik.yml`
+```yaml
+services:
+  frontend:
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy_net
+      - traefik.http.routers.mon-projet.rule=Host(`mon-projet.it-sefako.com`)
+      - traefik.http.routers.mon-projet.entrypoints=websecure
+      - traefik.http.routers.mon-projet.tls=true
+      - traefik.http.routers.mon-projet.tls.certresolver=myresolver
+      - traefik.http.services.mon-projet.loadbalancer.server.port=80
+    networks:
+      - proxy_net
+```
+
+### `docker-manager.yml`
+- la description des services publics et privés
+- les noms de domaines
+- les ports
+- les fichiers `.env`
+- un exemple lisible qui associe le service public à son domaine
+
+### `.env.example`
+- toutes les variables nécessaires au démarrage
+- des valeurs d'exemple lisibles
+- aucune vraie donnée sensible
+- `FRONTEND_DOMAIN`
+- `API_DOMAIN` si une API existe
+- `IDE_DOMAIN` si l'éditeur web est exposé
+- `TZ`
+
+## Exemple de structure Docker attendue
+```yaml
+services:
+  frontend:
+    build:
+      context: ./frontend
+    env_file:
+      - .env
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.mon-projet.rule=Host(`${{FRONTEND_DOMAIN}}`)
+      - traefik.http.services.mon-projet.loadbalancer.server.port=80
+```
+
+## Exemple de manifeste `docker-manager.yml`
+```yaml
+version: 1
+kind: auto-detected
+domains:
+  frontend: ${{DOMAIN}}
+services:
+  frontend:
+    public: true
+    domain: frontend
+    port: 80
+```
+
+## Exemple concret attendu pour `docker-compose.yml`
+```yaml
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    expose:
+      - "80"
+    restart: unless-stopped
+    networks:
+      - proxy_net
+
+networks:
+  proxy_net:
+    external: true
+```
+
+## Ce qu'il ne faut pas faire
+- inventer un backend si le projet est un simple site HTML / CSS / JavaScript
+- utiliser des labels Traefik sans `proxy_net`
+- oublier `websecure` sur un déploiement HTTPS
+- oublier `tls.certresolver=myresolver`
+- laisser les fichiers Docker incomplets et attendre que l'éditeur web devine le reste
+
+## Exemple de contenu attendu dans le code
+### `index.html`
+- structure de page simple et lisible
+- liens vers `styles.css` et `app.js`
+- aucun framework JavaScript
+
+### `styles.css`
+- variables de couleurs
+- layout responsive
+- typographie lisible
+
+### `app.js`
+- logique métier en JavaScript natif
+- lecture et écriture dans `localStorage` si le besoin le demande
+- aucune dépendance externe
+
+## Stack détectée
+- backend: `none`
+- frontend: `{stack.get('frontend')}`
+- base de données: `none`
+- layout: `static-only`
+
+## Corrections récentes
+{client_context.strip()[:1200] or "Aucune correction récente."}
+
+## Rappel déploiement
+- Compatible `docker_manager`
+- Compatible `traefik_master`
+- Réseau partagé `proxy_net`
+- Labels Traefik obligatoires
+- Domaine cible du type `mon-projet.it-sefako.com`
+- `docker-compose.yml`, `docker-compose.traefik.yml`, `docker-manager.yml` maintenus
+- `.env.example` clair et reproductible
+"""
+    return f"""# Global Environment
+
+## Projet
+- Titre: {project_title}
+- Project ID: `{project_id}`
+
+## Rôle de ce document
+Ce fichier est le contrat d'environnement à suivre par l'agent IA dans VS Code web.
+Il doit être lu avant toute modification de fichier, avant toute création de config, et avant toute génération de code.
+Si une consigne utilisateur contredit un ancien document, la consigne la plus récente prime.
+
+## Source de vérité
+- `README.md`
+- `docs/client_updates.md`
+- `docs/stack_decision.md`
+- `docs/requirements_matrix.md`
+- `docs/global_environment.md`
+
+## Ce que l'agent doit produire
+- des fichiers de configuration cohérents avec le stack validé
+- du code source uniquement dans le dossier du projet
+- aucune sortie hors workspace
+- des fichiers Markdown mis à jour quand une décision change
+
+## Contraintes obligatoires
+- Tout doit être exécuté dans Docker.
+- Ne jamais dépendre d'outils installés sur l'hôte.
+- Vérifier l'état runtime avec des commandes comme `docker compose ps`.
+- Lancer les commandes applicatives dans le conteneur adéquat avec `docker compose exec`.
+- Si le stack n'est pas prêt, ajuster d'abord les fichiers Docker.
+- Si une correction client change le stack, il faut réécrire les fichiers `.md` concernés avant de produire le code final.
 
 ## Commandes de contrôle attendues
 - `docker compose ps`
 - `docker compose exec <service> composer --version`
 - `docker compose exec <service> php artisan --version`
 - `docker compose exec <service> php -v`
+
+## Exemples d'actions attendues
+### Projet backend type Laravel
+```bash
+docker compose ps
+docker compose exec app composer install
+docker compose exec app php artisan --version
+docker compose exec app php artisan migrate --force
+```
+
+### Projet backend type FastAPI
+```bash
+docker compose ps
+docker compose exec backend python -m pip install -r requirements.txt
+docker compose exec backend python -m pytest
+```
+
+### Projet frontend statique
+```bash
+docker compose ps
+docker compose exec frontend ls -la /usr/share/nginx/html
+docker compose exec frontend cat /usr/share/nginx/html/index.html
+```
+
+## Exemples de fichiers à générer
+```text
+backend/
+  Dockerfile
+  requirements.txt | composer.json
+  app/main.py | public/index.php
+frontend/
+  Dockerfile
+  index.html | app/page.tsx
+  styles.css | globals.css
+  app.js
+docs/
+  global_environment.md
+  stack_decision.md
+  client_updates.md
+```
+
+## Exemple de contenu attendu dans le code
+### Si le stack est HTML / CSS / JavaScript
+- `index.html` avec structure sémantique claire
+- `styles.css` avec variables de couleur et responsive design
+- `app.js` en JavaScript natif, sans framework
+
+### Si le stack est FastAPI
+- `Dockerfile` Python
+- `requirements.txt`
+- `app/main.py`
+- routes simples, testables, documentées
+
+### Si le stack est Laravel
+- `composer.json`
+- `public/index.php`
+- `routes/api.php`
+- contrôleur de résumé ou de santé
 
 ## Exemple concret pour Laravel
 Quand le projet est en Laravel, les vérifications et opérations doivent ressembler à ceci:
@@ -953,6 +1361,9 @@ Remplace `app` par le nom réel du service applicatif si nécessaire.
 - base de données: `{stack.get('database')}`
 - layout: `{ 'monolithique' if stack.get('generation_frontend') == 'monolith' else 'séparé' }`
 
+## Corrections récentes
+{client_context.strip()[:1200] or "Aucune correction récente."}
+
 ## Rappel déploiement
 - Compatible `docker_manager`
 - Compatible `traefik_master`
@@ -964,71 +1375,76 @@ Remplace `app` par le nom réel du service applicatif si nécessaire.
 """
 
 
-def _editor_handoff(
-    project_title: str,
+async def refresh_project_workspace_documents(
+    *,
+    project_dir: str,
     project_id: str,
+    project_title: str,
     input_text: str,
     deliverables: dict[str, Any],
-    stack: dict[str, str],
-) -> str:
-    docs = [
-        "docs/global_environment.md",
-        "docs/editor_handoff.md",
-        "README.md",
-        "docs/cdc.md",
-        "docs/mcd.md",
-        "docs/architecture.md",
-        "docs/roadmap.md",
-        "docs/notes_synthese.md",
-        "docs/stack_decision.md",
-        "docs/implementation_plan.md",
-        "docs/requirements_matrix.md",
-    ]
-    return f"""# Handoff éditeur
+    db: AsyncSession | None = None,
+) -> dict[str, Any]:
+    base = Path(project_dir).resolve()
+    ensure_within_workspace(base, base)
 
-## Contexte
-- Projet: {project_title}
-- Project ID: `{project_id}`
-- Mode opératoire: les agents du studio ne produisent que les documents Markdown.
-- Responsabilité de l'éditeur: générer le code source réel, les fichiers de build, les routes, les composants et la structure finale du dépôt.
+    recent_notes: list[str] = []
+    if db is not None:
+        try:
+            result = await db.execute(
+                select(WorkflowEvent)
+                .where(WorkflowEvent.project_id == project_id, WorkflowEvent.event_type == "user_message")
+                .order_by(WorkflowEvent.sequence.desc())
+                .limit(12)
+            )
+            events = list(reversed(result.scalars().all()))
+            for event in events:
+                payload = event.payload or {}
+                content = (payload.get("content") or payload.get("message") or "").strip()
+                if not content:
+                    continue
+                author = (payload.get("author") or "Utilisateur").strip()
+                recent_notes.append(f"- {author}: {content}")
+        except Exception:
+            recent_notes = []
 
-## Instructions de démarrage
-1. Lire les documents du dossier `docs/` listés ci-dessous.
-2. Interpréter le stack détecté et confirmer s'il faut un frontend et un backend séparés.
-3. Si le stack est monolithique, garder la structure source à la racine du projet.
-4. Si le stack nécessite une séparation, créer uniquement la séparation utile, pas de structure artificielle.
-5. Générer le code source dans le workspace de l'éditeur, pas dans les agents du studio.
-6. Commencer par une conversation canonique du projet et conserver le contexte des documents fournis.
+    validation_answers = deliverables.get("validation_answers")
+    if isinstance(validation_answers, list) and validation_answers:
+        if recent_notes:
+            recent_notes.append("")
+        recent_notes.append("Réponses de validation enregistrées:")
+        for index, item in enumerate(validation_answers, start=1):
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or item.get("id") or f"Question {index}").strip()
+            answer = str(item.get("answer") or "").strip()
+            if answer:
+                recent_notes.append(f"- {index}. {question}: {answer}")
 
-## Documents de référence
-- {chr(10).join(f'- `{doc}`' for doc in docs)}
+    client_context = "\n".join(recent_notes).strip()
+    doc_input_text = input_text.strip()
+    if client_context:
+        doc_input_text = f"{doc_input_text}\n\n{client_context}"
 
-## Brief initial
-{input_text.strip()[:2000]}
-
-## Stack détectée
-- backend: `{stack.get('backend')}`
-- frontend: `{stack.get('frontend')}`
-- mobile: `{stack.get('mobile')}`
-- base de données: `{stack.get('database')}`
-- generation backend: `{stack.get('generation_backend')}`
-- generation frontend: `{stack.get('generation_frontend')}`
-
-## Livrables déjà préparés par les agents
-```json
-{json.dumps({
-    "cdc": str(deliverables.get("cdc") or "")[:1200],
-    "mcd": str(deliverables.get("mcd") or "")[:1200],
-    "architecture": str(deliverables.get("architecture") or "")[:1200],
-    "roadmap": str(deliverables.get("roadmap") or "")[:1200],
-    "notes_synthese": str(deliverables.get("notes_synthese") or "")[:1200],
-}, ensure_ascii=True, indent=2)}
-```
-
-## Règle d'or
-Ne redemande pas à l'utilisateur de reproduire le cadrage déjà fourni.
-Pars des documents existants et produis directement le code source attendu.
-"""
+    stack = detect_application_stack(project_title, doc_input_text, deliverables, extra_context=client_context)
+    docs_specs = _documentation_specs(
+        project_title,
+        project_id,
+        doc_input_text,
+        deliverables,
+        stack,
+        str(base.parent),
+        client_context=client_context,
+    )
+    files = [_write_workspace_file(base, relative_path, content) for relative_path, content in docs_specs]
+    _set_workspace_permissions(base)
+    return {
+        "project_dir": str(base),
+        "generated_at": utc_now_iso(),
+        "files": files,
+        "repo_name": base.name,
+        "stack": stack,
+        "client_context": client_context,
+    }
 
 def _next_frontend_dockerfile() -> str:
     return """FROM node:20-alpine
@@ -1315,6 +1731,8 @@ async def _backend_file_specs(
     stack: dict[str, str],
     llm_router: LLMRouter | None = None
 ) -> list[tuple[str, str]]:
+    if stack.get("generation_backend") == "none":
+        return []
     if llm_router is not None:
         llm_files = await _generate_llm_backend_files(project_title, deliverables, stack, llm_router)
         if llm_files:
@@ -1407,14 +1825,14 @@ def _requirements_matrix(project_title: str, input_text: str, deliverables: dict
     ]
     for index, requirement in enumerate(requirements, 1):
         lowered = requirement.lower()
-        refs = ["docs/cdc.md", "docs/stack_decision.md", "docs/editor_handoff.md"]
+        refs = ["docs/cdc.md", "docs/stack_decision.md", "docs/global_environment.md"]
         if any(word in lowered for word in ["api", "backend", "base", "donnée", "donnee", "auth", "crud", "laravel", "fastapi"]):
-            refs.append("docs/editor_handoff.md")
+            refs.append("docs/global_environment.md")
         if any(word in lowered for word in ["interface", "utilisateur", "page", "mobile", "frontend", "dashboard", "écran", "ecran"]):
             refs.append("docs/stack_decision.md")
         if any(word in lowered for word in ["docker", "déploiement", "deploiement", "traefik", "env"]):
-            refs.extend(["docs/editor_handoff.md", "README.md"])
-        coverage = "Tracé dans les documents de cadrage et le handoff éditeur. Le code source est délégué à l'éditeur web."
+            refs.extend(["docs/global_environment.md", "README.md"])
+        coverage = "Tracé dans les documents de cadrage et le guide d'éditeur web. Le code source est délégué à l'éditeur web."
         status = "couvert" if len(refs) > 2 else "à préciser"
         rows.append(f"| {index} | {requirement.replace('|', '/')} | {coverage} | {', '.join(dict.fromkeys(refs))} | {status} |")
     rows.extend([
@@ -1427,7 +1845,7 @@ def _requirements_matrix(project_title: str, input_text: str, deliverables: dict
         f"- backend confié à: `éditeur web`",
         f"- frontend confié à: `éditeur web`",
         "",
-        "Cette matrice sert de contrat de vérification pour le cadrage et le handoff éditeur.",
+        "Cette matrice sert de contrat de vérification pour le cadrage et le guide d'éditeur web.",
     ])
     return "\n".join(rows) + "\n"
 
@@ -1471,6 +1889,7 @@ def validate_workspace_delivery(
     stack = detect_application_stack(project_title, input_text, deliverables)
     required_files = [
         "README.md",
+        "docs/client_updates.md",
         "docs/cdc.md",
         "docs/mcd.md",
         "docs/architecture.md",
@@ -1480,20 +1899,17 @@ def validate_workspace_delivery(
         "docs/global_environment.md",
         "docs/implementation_plan.md",
         "docs/requirements_matrix.md",
-        "docs/editor_handoff.md",
         ".aia/workspace-policy.json",
     ]
     missing_files = [relative for relative in required_files if not (base / relative).exists()]
 
     readme = (base / "README.md").read_text(errors="ignore") if (base / "README.md").exists() else ""
     stack_decision = (base / "docs/stack_decision.md").read_text(errors="ignore") if (base / "docs/stack_decision.md").exists() else ""
-    handoff = (base / "docs/editor_handoff.md").read_text(errors="ignore") if (base / "docs/editor_handoff.md").exists() else ""
 
     checks = [
         {"key": "required_files", "label": "Documents minimum du repo présents", "ok": not missing_files},
         {"key": "readme_mentions_editor", "label": "README documente le passage de relais à l'éditeur", "ok": "éditeur" in readme.lower() and "Markdown" in readme},
         {"key": "stack_decision_present", "label": "Décision de stack documentée", "ok": "Décision de stack" in stack_decision and stack.get("backend") in stack_decision},
-        {"key": "editor_handoff_present", "label": "Handoff éditeur documenté", "ok": "Handoff éditeur" in handoff and "générer le code source" in handoff},
         {"key": "workspace_guard", "label": "Politique de confinement présente", "ok": (base / ".aia/workspace-policy.json").exists()},
     ]
     success = all(check["ok"] for check in checks)
@@ -1576,7 +1992,19 @@ def _implementation_plan(project_title: str, input_text: str, deliverables: dict
 """
 
 
-def _readme(project_title: str, project_id: str, deliverables: dict[str, Any], workspace_root: str, stack: dict[str, str]) -> str:
+def _readme(
+    project_title: str,
+    project_id: str,
+    deliverables: dict[str, Any],
+    workspace_root: str,
+    stack: dict[str, str],
+    client_context: str = "",
+) -> str:
+    backend_note = (
+        "Aucun backend n'est requis: le projet reste en HTML / CSS / JavaScript statique."
+        if stack.get("generation_backend") == "none"
+        else "Le backend éventuel est documenté dans `docs/stack_decision.md` et `docs/global_environment.md`."
+    )
     return f"""# {project_title}
 
 Project ID: `{project_id}`
@@ -1591,10 +2019,14 @@ Les agents du studio produisent les documents Markdown, puis l'éditeur web pren
 - base de données détectée: `{stack.get('database')}`
 - langages détectés: `{stack.get('languages')}`
 
+## Corrections récentes
+{client_context.strip()[:1200] or "Aucune correction récente."}
+
 ## Décision de livraison
 - code source généré par les agents: `non`
 - code source généré par l'éditeur web: `oui`
 - structure du dépôt décidée par le couple cadrage + éditeur web
+- {backend_note}
 
 ## Règles de travail
 - racine de génération: `{workspace_root}`
@@ -1602,11 +2034,6 @@ Les agents du studio produisent les documents Markdown, puis l'éditeur web pren
 - l'éditeur web reçoit ensuite le contexte et produit le dépôt exécutable
 - aucun accès direct à `docker_manager`, `traefik_master` ou aux autres projets
 
-## Livrables d'entrée
-
-```json
-{json.dumps(deliverables, indent=2, ensure_ascii=True)}
-```
 """
 
 

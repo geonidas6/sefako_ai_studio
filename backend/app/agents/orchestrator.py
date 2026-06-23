@@ -30,6 +30,14 @@ class WorkflowPaused(Exception):
     """Raised when a user pauses a running workflow."""
 
 
+class ValidationQuestionsRequired(WorkflowPaused):
+    """Raised when the orchestrator needs user validation before continuing."""
+
+    def __init__(self, questions: list[dict[str, Any]]):
+        super().__init__("Questions de validation en attente.")
+        self.questions = questions
+
+
 
 # ──────────────────────────────────────────────
 # State definition
@@ -48,6 +56,7 @@ class AiaState(TypedDict):
     ux_critique: str
     engineering_critique: str
     devops_critique: str
+    validation_questions: list[dict]
     # Final
     final_deliverables: dict
     error: Optional[str]
@@ -82,6 +91,11 @@ Inclus toujours: Infrastructure recommandée, Checklist sécurité, Pipeline CI/
 Tu reçois les analyses de 4 départements spécialisés et leurs critiques mutuelles.
 Ton rôle: synthétiser tout cela en livrables cohérents, résoudre les contradictions, produire le livrable final.
 Produis un JSON structuré avec les clés: cdc, mcd, architecture, roadmap, notes_synthese.""",
+
+    "orchestrator_validation": """Tu es l'Orchestrateur d'une agence IA d'élite.
+Tu ne produis pas de livrables finaux ici.
+Ton rôle est de formuler des questions de validation réellement utiles au client à partir du brief et des analyses déjà produites.
+Réponds uniquement en JSON valide, sans markdown ni texte supplémentaire.""",
 }
 
 
@@ -244,6 +258,14 @@ def preserve_deliverable_depth(deliverables: dict, r1: dict) -> dict:
 
     return enriched
 
+
+def has_complete_final_deliverables(deliverables: dict | None) -> bool:
+    if not isinstance(deliverables, dict):
+        return False
+    if deliverables.get("error"):
+        return False
+    return all(str(deliverables.get(key) or "").strip() for key in REQUIRED_DELIVERABLE_KEYS)
+
 # ──────────────────────────────────────────────
 # Agent node functions
 # ──────────────────────────────────────────────
@@ -310,6 +332,100 @@ Produis maintenant un JSON valide (sans markdown, juste le JSON brut) avec cette
   "roadmap": "Roadmap détaillée en Markdown, avec phases, priorités, MVP, dépendances et jalons.",
   "notes_synthese": "Notes de synthèse, arbitrages, risques, points ouverts et recommandations de suite."
 }}"""
+
+
+def make_validation_questions_prompt(input_text: str, r1: dict, critiques: dict) -> str:
+    r1_text = "\n\n".join([f"### {k.upper()}\n{clamp_text(v, 1600)}" for k, v in r1.items()])
+    critiques_text = "\n\n".join([f"### Critique {k.upper()}\n{clamp_text(v, 1200)}" for k, v in critiques.items() if str(v or "").strip()])
+    return f"""Tu es l'Orchestrateur d'une agence IA.
+À partir du brief, des analyses Round 1 et des critiques Round 2, tu dois formuler des questions de validation réellement utiles au client.
+
+PROJET:
+{clamp_text(input_text, 3000)}
+
+ANALYSES ROUND 1:
+{r1_text}
+
+CRITIQUES ROUND 2:
+{critiques_text or "(aucune critique disponible)"}
+
+RÈGLES:
+- Les questions doivent venir du besoin réel, pas d'une liste générique.
+- Chaque question doit débloquer une décision, une validation ou une précision.
+- Évite les questions trop larges ou redondantes.
+- Si une décision importante est déjà claire, ne la répète pas.
+- Produis entre 2 et 5 questions maximum.
+- Chaque question doit être concrète, courte et actionnable.
+
+Retourne uniquement un JSON valide avec la structure exacte:
+{{
+  "questions": [
+    {{
+      "id": "strategie-01",
+      "department": "strategy",
+      "question": "Question concise à poser au client",
+      "why_it_matters": "Pourquoi cette validation est importante",
+      "answer_type": "yes_no"
+    }}
+  ]
+}}
+
+Valeurs autorisées pour department: strategy, ux, engineering, devops, orchestrator.
+Valeurs autorisées pour answer_type: yes_no, choice, free_text.
+"""
+
+
+def _parse_validation_questions_json(raw: str) -> list[dict[str, Any]]:
+    candidates: list[str] = []
+    clean = _strip_code_fences(raw)
+    if clean:
+        candidates.append(clean)
+    json_block = re.search(r"```json\s*([\s\S]*?)```", raw or "", re.IGNORECASE)
+    if json_block:
+        candidates.append(json_block.group(1).strip())
+    balanced = _extract_balanced_json(clean or raw or "")
+    if balanced:
+        candidates.append(balanced.strip())
+    if raw and raw.strip():
+        candidates.append(raw.strip())
+
+    parsed: dict[str, Any] | None = None
+    decoder = json.JSONDecoder()
+    for candidate in candidates:
+        try:
+            loaded = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                loaded, _ = decoder.raw_decode(candidate[candidate.find('{'):] if '{' in candidate else candidate)
+            except Exception:
+                continue
+        if isinstance(loaded, dict):
+            parsed = loaded
+            break
+
+    if not parsed:
+        return []
+
+    questions = parsed.get("questions")
+    if not isinstance(questions, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(questions, start=1):
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        if not question:
+            continue
+        department = str(item.get("department") or "orchestrator").strip().lower()
+        normalized.append({
+            "id": str(item.get("id") or f"validation-{index}").strip(),
+            "department": department if department in {"strategy", "ux", "engineering", "devops", "orchestrator"} else "orchestrator",
+            "question": question,
+            "why_it_matters": str(item.get("why_it_matters") or "").strip(),
+            "answer_type": str(item.get("answer_type") or "free_text").strip().lower(),
+        })
+    return normalized
 
 
 # ──────────────────────────────────────────────
@@ -435,6 +551,21 @@ def build_graph(llm_router: LLMRouter, event_queue: asyncio.Queue, cancel_event:
             ("Critique Ingénierie déjà produite", state.get("engineering_critique")),
             ("Critique DevOps déjà produite", state.get("devops_critique")),
         ]
+        validation_context = state.get("final_deliverables") or {}
+        validation_questions = validation_context.get("validation_questions") if isinstance(validation_context, dict) else []
+        validation_answers = validation_context.get("validation_answers") if isinstance(validation_context, dict) else []
+        if isinstance(validation_questions, list) and validation_questions:
+            memory_items.append(("Questions de validation générées", "\n".join(
+                f"- {str(item.get('question') or '').strip()}".strip()
+                for item in validation_questions
+                if isinstance(item, dict) and str(item.get("question") or "").strip()
+            )))
+        if isinstance(validation_answers, list) and validation_answers:
+            memory_items.append(("Réponses utilisateur aux questions de validation", "\n".join(
+                f"- {str(item.get('question') or item.get('id') or 'Question')}: {str(item.get('answer') or '').strip()}"
+                for item in validation_answers
+                if isinstance(item, dict) and str(item.get("answer") or "").strip()
+            )))
         memory = [
             f"### {title}\\n{clamp_text(value, 900)}"
             for title, value in memory_items
@@ -475,7 +606,13 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
             existing = (results_by_agent.get(agent_key) or "").strip()
             if existing:
                 await emit("agent_complete", agent=agent_key, round=1, preview=existing[:200], content=existing, resumed=True)
-                await speak(agent_key, "lead", f"Checkpoint retrouvé : je conserve l'analyse déjà produite. Extrait : {excerpt(existing)}", 1, "checkpoint")
+                await speak(
+                    agent_key,
+                    "lead",
+                    "Checkpoint retrouvé : je conserve l'analyse déjà produite.\n\n" + existing,
+                    1,
+                    "checkpoint",
+                )
                 return existing
 
             await emit("agent_start", agent=agent_key, round=1)
@@ -553,7 +690,14 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
                 if debate_rounds == 1 and final_critiques.get(agent_key, "").strip():
                     existing = final_critiques[agent_key]
                     await emit("agent_complete", agent=agent_key, round=round_number, preview=existing[:150], content=existing, resumed=True)
-                    await speak(agent_key, "lead", f"Critique déjà sauvegardée, je la conserve : {excerpt(existing)}", round_number, "checkpoint", target="orchestrateur")
+                    await speak(
+                        agent_key,
+                        "lead",
+                        "Critique déjà sauvegardée, je la conserve.\n\n" + existing,
+                        round_number,
+                        "checkpoint",
+                        target="orchestrateur",
+                    )
                     return existing
 
                 await emit("agent_start", agent=agent_key, round=round_number)
@@ -595,12 +739,15 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
     async def round3_node(state: AiaState) -> dict:
         ensure_not_paused()
         final_round = 2 + await get_debate_rounds()
-        existing_deliverables = state.get("final_deliverables") or {}
-        if existing_deliverables and not existing_deliverables.get("error"):
+        existing_deliverables = dict(state.get("final_deliverables") or {})
+        if has_complete_final_deliverables(existing_deliverables):
             await emit("round_start", round=final_round, message="Livrables déjà disponibles, reprise depuis checkpoint...")
             await speak("orchestrator", "lead", "Les livrables consolidés existent déjà. Je les conserve au lieu de régénérer inutilement.", final_round, "checkpoint")
             await emit("workflow_complete", deliverables=existing_deliverables, resumed=True)
-            return {"final_deliverables": existing_deliverables}
+            return {
+                "final_deliverables": existing_deliverables,
+                "validation_questions": existing_deliverables.get("validation_questions", []) if isinstance(existing_deliverables, dict) else [],
+            }
 
         await emit("round_start", round=final_round, message="Synthèse finale en cours...")
         await speak("orchestrator", "lead", "Je récupère les analyses et les objections. Je vais arbitrer les contradictions et produire les livrables finaux.", final_round, "system_step")
@@ -617,8 +764,67 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
             "engineering": state["engineering_critique"],
             "devops": state["devops_critique"],
         }
+        validation_questions: list[dict[str, Any]] = []
 
         try:
+            if isinstance(existing_deliverables.get("validation_questions"), list):
+                validation_questions = [
+                    item for item in existing_deliverables.get("validation_questions", [])
+                    if isinstance(item, dict) and str(item.get("question") or "").strip()
+                ]
+
+            validation_answers = existing_deliverables.get("validation_answers") if isinstance(existing_deliverables, dict) else []
+            has_pending_validation = bool(existing_deliverables.get("validation_questions")) and not (
+                isinstance(validation_answers, list) and any(
+                    isinstance(item, dict) and str(item.get("answer") or "").strip()
+                    for item in validation_answers
+                )
+            )
+            if has_pending_validation:
+                await emit(
+                    "implementation_status",
+                    message="Attente des réponses de validation avant la synthèse finale.",
+                )
+                await speak(
+                    "orchestrator",
+                    "lead",
+                    "Je conserve les questions de validation déjà générées. J'attends les réponses du client avant de lancer la synthèse finale.",
+                    final_round,
+                    "validation_wait",
+                )
+                raise ValidationQuestionsRequired(existing_deliverables.get("validation_questions", []))
+
+            try:
+                if not validation_questions and not has_pending_validation:
+                    questions_raw = await llm_router.generate(
+                        make_validation_questions_prompt(await enriched_input(state), r1, critiques),
+                        "orchestrator",
+                        SYSTEM_PROMPTS["orchestrator_validation"],
+                    )
+                    validation_questions = _parse_validation_questions_json(questions_raw)
+                    if validation_questions:
+                        deliverables_with_questions = dict(existing_deliverables or {})
+                        deliverables_with_questions["validation_questions"] = validation_questions
+                        deliverables_with_questions["validation_status"] = "awaiting_user"
+                        await persist_project_field(state["project_id"], "final_deliverables", deliverables_with_questions)
+                        await emit(
+                            "implementation_status",
+                            message=f"{len(validation_questions)} question(s) de validation générées par l'orchestrateur IA.",
+                        )
+                        await speak(
+                            "orchestrator",
+                            "lead",
+                            "J'ai identifié les points qui méritent validation humaine avant de figer les livrables. Voici les questions prioritaires :\n\n"
+                            + "\n".join([f"{index}. {item['question']}" for index, item in enumerate(validation_questions, start=1)]),
+                            final_round,
+                            "validation_questions",
+                        )
+                        raise ValidationQuestionsRequired(validation_questions)
+            except Exception as questions_error:
+                if isinstance(questions_error, ValidationQuestionsRequired):
+                    raise
+                await emit("implementation_status", message=f"Impossible de générer les questions de validation: {questions_error}")
+
             retry_count = await get_final_json_retry_count()
             last_error: Exception | None = None
             raw = ""
@@ -657,13 +863,20 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
                 raise last_error or RuntimeError("L'orchestrateur IA n'a pas retourné un JSON valide pour les livrables.")
 
             deliverables = preserve_deliverable_depth(deliverables, r1)
+            if validation_questions:
+                deliverables["validation_questions"] = validation_questions
+            if isinstance(validation_answers, list) and validation_answers:
+                deliverables["validation_answers"] = validation_answers
+            deliverables["validation_status"] = "completed"
             ensure_not_paused()
             await persist_project_field(state["project_id"], "final_deliverables", deliverables)
             await emit("round_complete", round=final_round)
             await speak("orchestrator", "lead", "Consensus obtenu. Les livrables consolidés sont prêts pour validation humaine.", final_round, "complete")
             await emit("workflow_complete", deliverables=deliverables)
-            return {"final_deliverables": deliverables}
+            return {"final_deliverables": deliverables, "validation_questions": validation_questions}
 
+        except ValidationQuestionsRequired:
+            raise
         except Exception as e:
             await emit("workflow_error", error=str(e))
             raise
@@ -717,6 +930,7 @@ async def run_project_workflow(
         "ux_critique": critiques.get("ux", "") or "",
         "engineering_critique": critiques.get("engineering", "") or "",
         "devops_critique": critiques.get("devops", "") or "",
+        "validation_questions": [],
         "final_deliverables": (project.final_deliverables if project else None) or {},
         "error": None,
     }
@@ -738,15 +952,31 @@ async def run_project_workflow(
                 "engineering": final_state.get("engineering_critique", ""),
                 "devops": final_state.get("devops_critique", ""),
             }
-            from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, ensure_pipeline_metadata, get_workspace_settings
+            from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, ensure_pipeline_metadata, get_workspace_settings, refresh_project_workspace_documents
 
             deliverables = dict(final_state.get("final_deliverables", {}) or {})
+            validation_questions = final_state.get("validation_questions") or deliverables.get("validation_questions") or []
+            if validation_questions:
+                deliverables["validation_questions"] = validation_questions
             settings = await get_workspace_settings(db)
             deliverables = ensure_pipeline_metadata(deliverables, settings)
             project.final_deliverables = deliverables
             project.status = "completed"
             project.completed_at = datetime.now(timezone.utc)
             await db.commit()
+            workspace = deliverables.get("implementation_workspace")
+            if isinstance(workspace, dict) and workspace.get("project_dir"):
+                try:
+                    await refresh_project_workspace_documents(
+                        project_dir=str(workspace["project_dir"]),
+                        project_id=project.id,
+                        project_title=project.title,
+                        input_text=project.input_text,
+                        deliverables=deliverables,
+                        db=db,
+                    )
+                except Exception:
+                    pass
             await event_queue.put({
                 "type": "implementation_status",
                 "message": "Analyse terminée. Validation admin requise avant conception technique." if settings.require_technical_approval else "Analyse terminée. La conception technique peut démarrer.",
@@ -754,6 +984,41 @@ async def run_project_workflow(
             })
 
         return deliverables
+
+    except ValidationQuestionsRequired as e:
+        result = await db.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+        if project:
+            project.status = "paused"
+            deliverables = dict(project.final_deliverables or {})
+            if e.questions:
+                deliverables["validation_questions"] = e.questions
+            deliverables["validation_status"] = "awaiting_user"
+            project.final_deliverables = deliverables or None
+            project.completed_at = None
+            await db.commit()
+            workspace = deliverables.get("implementation_workspace")
+            if isinstance(workspace, dict) and workspace.get("project_dir"):
+                try:
+                    from app.core.project_workspace import refresh_project_workspace_documents
+
+                    await refresh_project_workspace_documents(
+                        project_dir=str(workspace["project_dir"]),
+                        project_id=project.id,
+                        project_title=project.title,
+                        input_text=project.input_text,
+                        deliverables=deliverables,
+                        db=db,
+                    )
+                except Exception:
+                    pass
+        await event_queue.put({
+            "type": "workflow_paused",
+            "message": str(e),
+            "reason": "validation_required",
+            "validation_questions": e.questions,
+        })
+        return dict(project.final_deliverables or {})
 
     except WorkflowPaused as e:
         result = await db.execute(select(Project).where(Project.id == project_id))

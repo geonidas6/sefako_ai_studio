@@ -180,6 +180,12 @@ export const api = {
         method: 'POST',
       });
     },
+    async submitValidationAnswers(id: string, answers: { id: string; question: string; department: string; answer: string }[]) {
+      return request(`/projects/${id}/validation/answers`, {
+        method: 'POST',
+        body: JSON.stringify({ answers }),
+      });
+    },
     async startTechnicalDesign(id: string, approved = false) {
       return request(`/projects/${id}/technical-design/start`, {
         method: 'POST',

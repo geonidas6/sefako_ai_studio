@@ -1,5 +1,5 @@
 export interface WsEvent {
-  type: 'workflow_started' | 'user_message' | 'round_start' | 'round_complete' | 'agent_start' | 'agent_complete' | 'employee_message' | 'agent_error' | 'workflow_complete' | 'workflow_error' | 'workflow_paused' | 'implementation_status' | 'implementation_complete' | 'implementation_error' | 'error' | 'ping';
+  type: 'workflow_started' | 'user_message' | 'round_start' | 'round_complete' | 'agent_start' | 'agent_complete' | 'employee_message' | 'agent_error' | 'workflow_complete' | 'workflow_error' | 'workflow_paused' | 'implementation_status' | 'implementation_complete' | 'implementation_error' | 'validation_answers_saved' | 'error' | 'ping';
   timestamp?: string;
   sequence?: number;
   round?: number;
@@ -17,6 +17,20 @@ export interface WsEvent {
   target?: string;
   error?: string;
   preview?: string;
+  reason?: string;
+  validation_questions?: {
+    id?: string;
+    department?: string;
+    question?: string;
+    why_it_matters?: string;
+    answer_type?: string;
+  }[];
+  validation_answers?: {
+    id?: string;
+    department?: string;
+    question?: string;
+    answer?: string;
+  }[];
   deliverables?: {
     cdc?: string;
     mcd?: string;

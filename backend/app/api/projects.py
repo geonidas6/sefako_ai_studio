@@ -1,9 +1,10 @@
 import io
+import re
 import shutil
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 from urllib.error import URLError
 from urllib.parse import urljoin
 from urllib.request import urlopen
@@ -12,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, delete
 from pydantic import BaseModel
 
-from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, IMPLEMENTATION_WORKSPACE_KEY, ensure_pipeline_metadata, ensure_within_workspace, get_workspace_settings, initialize_project_workspace, set_pipeline_phase
+from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, IMPLEMENTATION_WORKSPACE_KEY, ensure_pipeline_metadata, ensure_within_workspace, get_workspace_settings, initialize_project_workspace, refresh_project_workspace_documents, set_pipeline_phase
 from app.core.security import get_current_admin
+from app.core.llm_router import LLMRouter
 from app.db.database import get_db
 from app.models.project import Project
 from app.models.workflow_event import WorkflowEvent
@@ -21,6 +23,12 @@ from app.core.workflow_runner import get_project_events, is_workflow_active, pub
 from app.core.implementation_runner import is_implementation_active, start_implementation_pipeline
 
 router = APIRouter()
+
+
+QUESTION_STARTERS = (
+    "pourquoi", "comment", "quand", "quoi", "quel", "quelle", "quels", "quelles",
+    "peux-tu", "pouvez-vous", "est-ce que", "dois-je", "devons-nous", "faut-il",
+)
 
 
 
@@ -110,6 +118,49 @@ def _build_markdown_export(project: Project) -> str:
         str(deliverables.get('notes_synthese') or ''),
         '',
     ]
+    validation_questions = deliverables.get("validation_questions")
+    if isinstance(validation_questions, list) and validation_questions:
+        sections.extend([
+            '## Questions de validation',
+            '',
+        ])
+        for index, item in enumerate(validation_questions, start=1):
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question") or "").strip()
+            if not question:
+                continue
+            sections.extend([
+                f"### Question {index}",
+                '',
+                f"- Département: `{item.get('department') or 'orchestrator'}`",
+                f"- Type de réponse: `{item.get('answer_type') or 'free_text'}`",
+                f"- Question: {question}",
+            ])
+            why_it_matters = str(item.get("why_it_matters") or "").strip()
+            if why_it_matters:
+                sections.append(f"- Pourquoi: {why_it_matters}")
+            sections.append('')
+    validation_answers = deliverables.get("validation_answers")
+    if isinstance(validation_answers, list) and validation_answers:
+        sections.extend([
+            '## Réponses de validation',
+            '',
+        ])
+        for index, item in enumerate(validation_answers, start=1):
+            if not isinstance(item, dict):
+                continue
+            answer = str(item.get("answer") or "").strip()
+            if not answer:
+                continue
+            sections.extend([
+                f"### Réponse {index}",
+                '',
+                f"- Département: `{item.get('department') or 'orchestrator'}`",
+                f"- Question: {str(item.get('question') or '').strip() or 'n/a'}",
+                f"- Réponse: {answer}",
+            ])
+            sections.append('')
     pipeline = deliverables.get(IMPLEMENTATION_PIPELINE_KEY)
     if isinstance(pipeline, dict):
         sections.extend([
@@ -152,6 +203,48 @@ def _probe_url(url: str, timeout: float = 2.0) -> bool:
     except Exception:
         return False
 
+
+def _looks_like_question(text: str) -> bool:
+    content = (text or "").strip().lower()
+    if not content:
+        return False
+    if "?" in content:
+        return True
+    return any(content.startswith(prefix) for prefix in QUESTION_STARTERS)
+
+
+def _project_question_prompt(project: Project, question: str) -> str:
+    deliverables = dict(project.final_deliverables or {})
+    critiques = dict(project.critiques or {})
+    return f"""Tu es l'orchestrateur du projet et tu réponds directement à la question du client.
+Réponds en français, de façon utile, concrète et courte.
+Si la question touche un point déjà tranché dans les livrables, rappelle la décision.
+Si la réponse dépend d'un choix, propose 2 ou 3 options maximum avec une recommandation.
+N'invente rien qui contredirait les livrables existants.
+
+CONTEXTE PROJET
+- Titre: {project.title}
+- Statut: {project.status}
+- Brief: {project.input_text}
+
+LIVRABLES ACTUELS
+- CDC: {str(deliverables.get("cdc") or "")[:1800]}
+- MCD: {str(deliverables.get("mcd") or "")[:1800]}
+- Architecture: {str(deliverables.get("architecture") or "")[:1800]}
+- Roadmap: {str(deliverables.get("roadmap") or "")[:1800]}
+- Notes: {str(deliverables.get("notes_synthese") or "")[:1800]}
+
+CRITIQUES
+- Stratégie: {str(critiques.get("strategy") or "")[:1200]}
+- UX: {str(critiques.get("ux") or "")[:1200]}
+- Ingénierie: {str(critiques.get("engineering") or "")[:1200]}
+- DevOps: {str(critiques.get("devops") or "")[:1200]}
+
+QUESTION DU CLIENT
+{question}
+
+Retourne une réponse claire et concise en Markdown léger, sans JSON."""
+
 class ProjectCreateIn(BaseModel):
     title: str
     input_text: str
@@ -183,6 +276,17 @@ class TechnicalDesignStartIn(BaseModel):
 
 class ImplementationStartIn(BaseModel):
     approved: bool = False
+
+
+class ValidationAnswerIn(BaseModel):
+    id: str
+    question: str = ""
+    department: str = "orchestrator"
+    answer: str
+
+
+class ValidationAnswersSubmitIn(BaseModel):
+    answers: list[ValidationAnswerIn]
 
 
 class WorkspaceFileUpdateIn(BaseModel):
@@ -277,6 +381,31 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
         "message": content,
     })
 
+    if _looks_like_question(content):
+        llm_router = LLMRouter(db)
+        try:
+            answer = await llm_router.generate(
+                prompt=_project_question_prompt(project, content),
+                agent_type="orchestrator",
+                system_prompt="Tu es l'orchestrateur d'une agence IA. Tu réponds aux questions du client avec précision, clarté et cohérence avec le projet.",
+            )
+            await publish_project_event(project_id, {
+                "type": "employee_message",
+                "agent": "orchestrator",
+                "department": "Orchestrateur",
+                "employee": {"name": "Sefako Orchestrateur", "role": "Chef de projet IA", "avatar": "SO"},
+                "message": answer,
+                "phase": "client_question",
+                "target": "client",
+            })
+            return {"success": True, "restart_triggered": False, "question_answered": True}
+        except Exception as exc:
+            await publish_project_event(project_id, {
+                "type": "implementation_status",
+                "message": f"Impossible de répondre automatiquement à la question: {exc}",
+            })
+            return {"success": True, "restart_triggered": False, "question_answered": False}
+
     if project.status == "running" or is_workflow_active(project_id):
         await publish_project_event(project_id, {
             "type": "employee_message",
@@ -287,16 +416,45 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
             "phase": "client_input",
             "target": "tous les départements",
         })
+        workspace = _get_workspace_dir(project)
+        if workspace is not None:
+            try:
+                await refresh_project_workspace_documents(
+                    project_dir=str(workspace),
+                    project_id=project.id,
+                    project_title=project.title,
+                    input_text=project.input_text,
+                    deliverables=dict(project.final_deliverables or {}),
+                    db=db,
+                )
+            except Exception:
+                pass
         return {"success": True, "restart_triggered": False}
 
     if project.status in {"completed", "failed", "paused"}:
-        deliverables = dict(project.final_deliverables or {})
+        previous_deliverables = dict(project.final_deliverables or {})
+        deliverables = dict(previous_deliverables)
         for key in ["cdc", "mcd", "architecture", "roadmap", "notes_synthese", "error"]:
             deliverables.pop(key, None)
         project.final_deliverables = deliverables or None
         project.status = "pending"
         project.completed_at = None
         await db.commit()
+
+        workspace = _get_workspace_dir(project)
+        if workspace is not None:
+            try:
+                await refresh_project_workspace_documents(
+                    project_dir=str(workspace),
+                    project_id=project.id,
+                    project_title=project.title,
+                    input_text=project.input_text,
+                    deliverables=previous_deliverables,
+                    db=db,
+                )
+            except Exception:
+                pass
+
         await publish_project_event(project_id, {
             "type": "employee_message",
             "agent": "orchestrator",
@@ -372,6 +530,63 @@ async def restart_project(project_id: str, db: AsyncSession = Depends(get_db)):
     return project_to_dict(project)
 
 
+@router.post("/{project_id}/validation/answers", response_model=ProjectOut)
+async def submit_validation_answers(project_id: str, body: ValidationAnswersSubmitIn, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    normalized_answers = []
+    for item in body.answers:
+        answer = item.answer.strip()
+        if not answer:
+            continue
+        normalized_answers.append({
+            "id": item.id.strip() or item.question.strip() or "validation",
+            "question": item.question.strip(),
+            "department": (item.department or "orchestrator").strip().lower(),
+            "answer": answer,
+        })
+
+    if not normalized_answers:
+        raise HTTPException(status_code=400, detail="Aucune réponse de validation valide fournie.")
+
+    deliverables = dict(project.final_deliverables or {})
+    deliverables["validation_answers"] = normalized_answers
+    deliverables["validation_status"] = "answers_submitted"
+    project.final_deliverables = deliverables
+    project.status = "paused"
+    project.completed_at = None
+    await db.commit()
+    await db.refresh(project)
+
+    workspace = _get_workspace_dir(project)
+    if workspace is not None:
+        try:
+            await refresh_project_workspace_documents(
+                project_dir=str(workspace),
+                project_id=project.id,
+                project_title=project.title,
+                input_text=project.input_text,
+                deliverables=dict(project.final_deliverables or {}),
+                db=db,
+            )
+        except Exception:
+            pass
+
+    await publish_project_event(project_id, {
+        "type": "validation_answers_saved",
+        "message": "Réponses de validation enregistrées. Reprise automatique de l'analyse.",
+        "validation_answers": normalized_answers,
+    })
+
+    await start_project_workflow(project_id, reset=False)
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    updated_project = result.scalar_one_or_none()
+    return project_to_dict(updated_project or project)
+
+
 @router.post("/{project_id}/technical-design/start", response_model=ProjectOut)
 async def start_technical_design(
     project_id: str,
@@ -421,6 +636,18 @@ async def start_technical_design(
     project.final_deliverables = deliverables
     await db.commit()
     await db.refresh(project)
+
+    try:
+        await refresh_project_workspace_documents(
+            project_dir=workspace_info["project_dir"],
+            project_id=project.id,
+            project_title=project.title,
+            input_text=project.input_text,
+            deliverables=dict(project.final_deliverables or {}),
+            db=db,
+        )
+    except Exception:
+        pass
 
     await publish_project_event(project_id, {
         "type": "employee_message",

@@ -208,6 +208,11 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
                 feature_requests = request_file.read_text(encoding='utf-8', errors='ignore')[-6000:]
                 if feature_requests.strip():
                     effective_input_text += f"\n\nDemandes applicatives depuis l'IDE:\n{feature_requests}"
+            client_updates_file = Path(str(workspace['project_dir'])).resolve() / 'docs/client_updates.md'
+            if client_updates_file.exists():
+                client_updates = client_updates_file.read_text(encoding='utf-8', errors='ignore')[-6000:]
+                if client_updates.strip():
+                    effective_input_text += f"\n\nCorrections de cadrage depuis l'IDE:\n{client_updates}"
         except Exception:
             pass
 
@@ -226,7 +231,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
 
         pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je consolide le cadrage Markdown: CDC, MCD, architecture, roadmap, matrice et handoff éditeur.", 'documentation_pack', 'docs/editor_handoff.md')
+        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je consolide le cadrage Markdown: CDC, MCD, architecture, roadmap, matrice et pack documentaire pour l'éditeur web.", 'documentation_pack', 'docs/global_environment.md')
         await _publish_pipeline(project_id, pipeline, 'Pack documentaire préparé.')
         pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
@@ -261,7 +266,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
 
         pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture documentaire, validation et handoff éditeur.", 'delivery_review', 'docs/delivery_review.md')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture documentaire, validation et passage vers l'éditeur web.", 'delivery_review', 'docs/delivery_review.md')
         pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'completed', overall_status='completed', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [], last_error=None)
 
         deliverables[IMPLEMENTATION_WORKSPACE_KEY] = {

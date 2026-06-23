@@ -56,8 +56,8 @@ async def main():
             raise SystemExit("WORKSPACE_NOT_FOUND")
 
         path = Path(project_dir).resolve()
-        if not str(path).startswith("/opt/"):
-            raise SystemExit("WORKSPACE_OUTSIDE_OPT")
+        if not str(path).startswith("/projects/"):
+            raise SystemExit("WORKSPACE_OUTSIDE_PROJECTS")
 
         print(path)
 
@@ -65,7 +65,7 @@ asyncio.run(main())
 PY
 )"
 CONTAINER_WORKSPACE="$(printf '%s
-' "$CONTAINER_WORKSPACE" | awk '/^\/opt\// { value = $0 } END { print value }')"
+' "$CONTAINER_WORKSPACE" | awk '/^\/projects\// { value = $0 } END { print value }')"
 
 if [[ -z "$CONTAINER_WORKSPACE" ]]; then
   echo "Workspace introuvable dans le conteneur backend." >&2
@@ -83,9 +83,8 @@ DEST_PATH="$DEST_ROOT/$REPO_NAME"
 
 if [[ -e "$DEST_PATH" ]]; then
   echo "Destination deja existante: $DEST_PATH" >&2
-  echo "Par securite, l'export refuse d'ecraser un dossier existant." >&2
-  echo "Renomme ou deplace ce dossier, puis relance la commande." >&2
-  exit 1
+  echo "Ecrasement en cours..." >&2
+  rm -rf "$DEST_PATH"
 fi
 
 mkdir -p "$DEST_ROOT"
