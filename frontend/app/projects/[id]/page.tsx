@@ -310,6 +310,21 @@ export default function ProjectDashboard() {
     setExpandedMessages((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
+  const scrollToValidationQuestions = () => {
+    if (typeof window === 'undefined') return;
+    const el = document.getElementById('validation-questions');
+    if (!el) {
+      window.location.hash = 'validation-questions';
+      return;
+    }
+    const top = Math.max(0, el.getBoundingClientRect().top + window.scrollY - 96);
+    window.history.replaceState(null, '', '#validation-questions');
+    window.scrollTo({ top, behavior: 'smooth' });
+    if (typeof (el as HTMLElement).focus === 'function') {
+      (el as HTMLElement).focus({ preventScroll: true });
+    }
+  };
+
   const wsCleanupRef = useRef<(() => void) | null>(null);
   const seenEventSequencesRef = useRef<Set<number>>(new Set());
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -444,6 +459,11 @@ export default function ProjectDashboard() {
         setLogs((prev) => [...prev, {
           text: 'Question envoyée aux agents. Une réponse apparaît dans le fil de discussion.',
           type: 'info',
+        }]);
+      } else if (result?.error) {
+        setLogs((prev) => [...prev, {
+          text: result.error,
+          type: 'error',
         }]);
       } else if (result?.restart_triggered) {
         setWsStatus('running');
@@ -930,6 +950,7 @@ export default function ProjectDashboard() {
   const round2Complete = Boolean(critiques.strategy && critiques.ux && critiques.engineering && critiques.devops);
   const hasDeliverables = Boolean(deliverables.cdc || deliverables.mcd || deliverables.architecture || deliverables.roadmap);
   const hasValidationQuestions = validationQuestions.length > 0;
+  const canSubmitValidationAnswers = hasValidationQuestions;
 
   const projectStatusLabel = (() => {
     switch (project.status) {
@@ -1300,16 +1321,14 @@ export default function ProjectDashboard() {
             </Card>
           )}
 
-          {hasValidationQuestions && (
+          {hasValidationQuestions && project.status !== 'paused' && (
             <Card className="border-primary/20 bg-primary/5">
               <CardHeader className="pb-3">
                 <CardTitle className="text-base flex items-center gap-2">
                   <HelpCircle className="h-4 w-4 text-primary" /> Questions de validation IA
                 </CardTitle>
                 <CardDescription>
-                  {project.status === 'paused'
-                    ? 'Réponds aux questions ci-dessous pour reprendre automatiquement l’analyse.'
-                    : 'Les agents ont identifié des points à valider avant de figer le cadrage et l’implémentation.'}
+                  Les agents ont identifié des points à valider avant de figer le cadrage et l’implémentation.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4 text-sm text-muted-foreground">
@@ -1330,27 +1349,8 @@ export default function ProjectDashboard() {
                     {item.why_it_matters && (
                       <p className="text-xs leading-relaxed text-muted-foreground">{String(item.why_it_matters)}</p>
                     )}
-                    {project.status === 'paused' && (
-                      <textarea
-                        value={validationDrafts[String(item.id || '')] || ''}
-                        onChange={(event) => setValidationDrafts((prev) => ({ ...prev, [String(item.id || '')]: event.target.value }))}
-                        placeholder="Écris ta réponse ici..."
-                        className="mt-2 min-h-[96px] w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-                      />
-                    )}
                   </div>
                 ))}
-                {project.status === 'paused' && (
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button onClick={handleSubmitValidationAnswers} disabled={submittingValidation} className="gap-2">
-                      {submittingValidation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
-                      Répondre et reprendre
-                    </Button>
-                    <p className="text-xs text-muted-foreground">
-                      L’analyse reprendra automatiquement juste après l’enregistrement des réponses.
-                    </p>
-                  </div>
-                )}
               </CardContent>
             </Card>
           )}
@@ -1494,8 +1494,74 @@ export default function ProjectDashboard() {
                 )}
               </div>
             </div>
+
+            {project.status === 'paused' && hasValidationQuestions && (
+              <div className="mt-5 rounded-2xl border border-primary/20 bg-primary/5 p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-primary">Validation requise pour continuer</p>
+                  <p className="text-xs text-muted-foreground">
+                    Réponds une seule fois aux questions ci-dessous, puis le workflow repart automatiquement vers la synthèse finale.
+                  </p>
+                </div>
+                <Button variant="outline" className="gap-2" onClick={scrollToValidationQuestions}>
+                  <HelpCircle className="h-4 w-4" />
+                  Aller aux questions
+                </Button>
+              </div>
+            )}
           </div>
         </header>
+
+        {hasValidationQuestions && project.status === 'paused' && (
+          <div className="max-w-7xl mx-auto px-6 pt-6 w-full">
+            <Card id="validation-questions" tabIndex={-1} className="border-primary/20 bg-primary/5">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <HelpCircle className="h-4 w-4 text-primary" /> Questions de validation IA
+                </CardTitle>
+                <CardDescription>
+                  Réponds une seule fois aux questions ci-dessous, puis le workflow repart automatiquement vers la synthèse finale.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4 text-sm text-muted-foreground">
+                {validationQuestions.map((item: any, index: number) => (
+                  <div key={item.id || index} className="rounded-lg border border-border/60 bg-background/70 p-4 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-primary">
+                        {index + 1}
+                      </span>
+                      <span className="rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-primary">
+                        {String(item.department || 'orchestrator')}
+                      </span>
+                      <span className="rounded-full border border-border/60 bg-muted/60 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                        {String(item.answer_type || 'free_text')}
+                      </span>
+                    </div>
+                    <p className="text-sm font-medium text-foreground">{index + 1}. {String(item.question || '').trim()}</p>
+                    {item.why_it_matters && (
+                      <p className="text-xs leading-relaxed text-muted-foreground">{String(item.why_it_matters)}</p>
+                    )}
+                    <textarea
+                      value={validationDrafts[String(item.id || '')] || ''}
+                      onChange={(event) => setValidationDrafts((prev) => ({ ...prev, [String(item.id || '')]: event.target.value }))}
+                      placeholder="Écris ta réponse ici..."
+                      className="mt-2 min-h-[96px] w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+                ))}
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button onClick={handleSubmitValidationAnswers} disabled={submittingValidation} className="gap-2">
+                    {submittingValidation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                    Répondre et reprendre
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    L’analyse reprendra automatiquement juste après l’enregistrement des réponses.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
         <main className="flex-1 max-w-7xl mx-auto px-6 py-8 w-full flex flex-col gap-8">
           {(project.status === 'failed' || (project.status === 'paused' && !hasValidationQuestions)) && (

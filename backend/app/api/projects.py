@@ -19,7 +19,7 @@ from app.core.llm_router import LLMRouter
 from app.db.database import get_db
 from app.models.project import Project
 from app.models.workflow_event import WorkflowEvent
-from app.core.workflow_runner import get_project_events, is_workflow_active, publish_project_event, request_pause, start_project_workflow
+from app.core.workflow_runner import get_project_events, is_workflow_active, publish_project_event, request_pause, start_project_workflow, wait_for_workflow_to_finish
 from app.core.implementation_runner import is_implementation_active, start_implementation_pipeline
 
 router = APIRouter()
@@ -384,10 +384,11 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
     if _looks_like_question(content):
         llm_router = LLMRouter(db)
         try:
-            answer = await llm_router.generate(
+            answer = await llm_router.generate_with_fallback(
                 prompt=_project_question_prompt(project, content),
                 agent_type="orchestrator",
                 system_prompt="Tu es l'orchestrateur d'une agence IA. Tu réponds aux questions du client avec précision, clarté et cohérence avec le projet.",
+                fallback_providers=["gemini", "anthropic", "openai", "deepseek", "groq", "mistral", "qwen", "azure_openai", "bedrock", "openrouter"],
             )
             await publish_project_event(project_id, {
                 "type": "employee_message",
@@ -400,11 +401,12 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
             })
             return {"success": True, "restart_triggered": False, "question_answered": True}
         except Exception as exc:
+            error_message = f"Impossible de répondre automatiquement à la question: {exc}"
             await publish_project_event(project_id, {
                 "type": "implementation_status",
-                "message": f"Impossible de répondre automatiquement à la question: {exc}",
+                "message": error_message,
             })
-            return {"success": True, "restart_triggered": False, "question_answered": False}
+            return {"success": True, "restart_triggered": False, "question_answered": False, "error": error_message}
 
     if project.status == "running" or is_workflow_active(project_id):
         await publish_project_event(project_id, {
@@ -581,7 +583,11 @@ async def submit_validation_answers(project_id: str, body: ValidationAnswersSubm
         "validation_answers": normalized_answers,
     })
 
-    await start_project_workflow(project_id, reset=False)
+    await wait_for_workflow_to_finish(project_id, timeout_seconds=10.0)
+    restart_result = await start_project_workflow(project_id, reset=False)
+    if restart_result.get("already_running"):
+        await wait_for_workflow_to_finish(project_id, timeout_seconds=10.0)
+        await start_project_workflow(project_id, reset=False)
     result = await db.execute(select(Project).where(Project.id == project_id))
     updated_project = result.scalar_one_or_none()
     return project_to_dict(updated_project or project)

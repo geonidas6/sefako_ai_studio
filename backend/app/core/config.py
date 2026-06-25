@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # LLM API keys (fallback from env if not set in DB)
     gemini_api_key: str = ""
+    deepseek_api_key: str = ""
     grok_api_key: str = ""
     groq_api_key: str = ""
     anthropic_api_key: str = ""
@@ -33,6 +34,10 @@ class Settings(BaseSettings):
     nvidia_api_key: str = ""
     mistral_api_key: str = ""
     qwen_api_key: str = ""
+    azure_openai_api_key: str = ""
+    azure_openai_endpoint: str = ""
+    azure_openai_api_version: str = ""
+    bedrock_region: str = ""
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000"]

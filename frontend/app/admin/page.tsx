@@ -35,7 +35,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
-type AdminSection = 'projects' | 'departments' | 'settings';
+type AdminSection = 'projects' | 'departments' | 'settings' | 'security';
 
 interface Project {
   id: string;
@@ -108,6 +108,7 @@ interface QwenAuthStatus {
 
 const providerKeyLinks: Record<string, string> = {
   gemini: 'https://aistudio.google.com/app/apikey',
+  deepseek: 'https://api-docs.deepseek.com/',
   anthropic: 'https://console.anthropic.com/settings/keys',
   openai: 'https://platform.openai.com/api-keys',
   openrouter: 'https://openrouter.ai/docs/quickstart',
@@ -116,6 +117,14 @@ const providerKeyLinks: Record<string, string> = {
   groq: 'https://console.groq.com/keys',
   mistral: 'https://console.mistral.ai/api-keys',
   qwen: 'https://dashscope.console.aliyun.com/apiKey',
+  azure_openai: 'https://portal.azure.com/',
+  bedrock: 'https://console.aws.amazon.com/bedrock/',
+};
+
+const providerSetupNotes: Record<string, string> = {
+  deepseek: 'Compatible OpenAI endpoint. Utilise une clé DeepSeek classique.',
+  azure_openai: 'Nécessite AZURE_OPENAI_ENDPOINT et AZURE_OPENAI_API_VERSION côté backend.',
+  bedrock: 'Utilise les identifiants AWS du backend et la variable BEDROCK_REGION.',
 };
 
 export default function AdminDashboard() {
@@ -135,6 +144,12 @@ export default function AdminDashboard() {
   const [qwenAuth, setQwenAuth] = useState<QwenAuthStatus>({ authenticated: false, method: 'none' });
   const [startingQwenAuth, setStartingQwenAuth] = useState(false);
   const [savingQwenCliKey, setSavingQwenCliKey] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  });
+  const [savingPasswordChange, setSavingPasswordChange] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -270,10 +285,10 @@ export default function AdminDashboard() {
 
   const handleTestConnection = async (provider: string, activeModel: string) => {
     const key = apiKeys[provider];
-    if (!key) return;
+    if (provider !== 'bedrock' && !key) return;
     setTestingKey({ ...testingKey, [provider]: true });
     try {
-      const res = await api.admin.testConnection(provider, key, activeModel);
+      const res = await api.admin.testConnection(provider, key || '', activeModel);
       setTestResult({
         ...testResult,
         [provider]: { success: res.success, message: res.message || 'Connexion réussie !' },
@@ -480,6 +495,35 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleChangePassword = async () => {
+    setError('');
+    setSuccessMsg('');
+
+    if (!passwordForm.currentPassword || !passwordForm.newPassword || !passwordForm.confirmPassword) {
+      setError('Merci de remplir les trois champs.');
+      return;
+    }
+
+    setSavingPasswordChange(true);
+    try {
+      await api.auth.changePassword(
+        passwordForm.currentPassword,
+        passwordForm.newPassword,
+        passwordForm.confirmPassword
+      );
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setSuccessMsg('Mot de passe mis à jour. Reconnexion en cours...');
+      setTimeout(() => {
+        api.auth.logout();
+        router.push('/admin/login');
+      }, 1400);
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors du changement de mot de passe.');
+    } finally {
+      setSavingPasswordChange(false);
+    }
+  };
+
   const adminSections = [
     {
       key: 'projects' as const,
@@ -498,6 +542,12 @@ export default function AdminDashboard() {
       label: 'Paramètre',
       description: 'Providers, modèles et quotas',
       icon: Settings,
+    },
+    {
+      key: 'security' as const,
+      label: 'Sécurité',
+      description: 'Mot de passe de l’admin',
+      icon: Key,
     },
   ];
 
@@ -1036,9 +1086,15 @@ export default function AdminDashboard() {
                     </p>
                   </div>
 
+                  {providerSetupNotes[config.provider] && (
+                    <div className="rounded-lg border border-dashed border-border/60 bg-muted/20 px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">
+                      {providerSetupNotes[config.provider]}
+                    </div>
+                  )}
+
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-bold text-muted-foreground uppercase flex items-center justify-between">
-                      Clé API
+                      Clé API {config.provider === 'bedrock' ? '(optionnelle)' : ''}
                       {config.has_api_key && <span className="text-emerald-500 font-bold lowercase italic tracking-normal">Enregistrée ✓</span>}
                     </label>
                     <div className="flex gap-2">
@@ -1046,13 +1102,13 @@ export default function AdminDashboard() {
                         type="password"
                         value={keyInput}
                         onChange={(e) => setApiKeys({ ...apiKeys, [config.provider]: e.target.value })}
-                        placeholder={config.has_api_key ? '••••••••••••' : 'Ajouter une clé'}
+                        placeholder={config.provider === 'bedrock' ? 'Aucune clé requise' : (config.has_api_key ? '••••••••••••' : 'Ajouter une clé')}
                         className="h-9 font-mono"
                       />
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={!keyInput || testingKey[config.provider]}
+                        disabled={(config.provider !== 'bedrock' && !keyInput) || testingKey[config.provider]}
                         onClick={() => handleTestConnection(config.provider, activeModel)}
                         className="h-9"
                       >
@@ -1098,12 +1154,12 @@ export default function AdminDashboard() {
                     </div>
                   )}
 
-                  {keyInput && (
+                  {(keyInput || config.provider === 'bedrock') && (
                     <Button
                       onClick={() => handleUpdateProvider(config.provider, isEnabled, activeModel)}
                       className="w-full h-9"
                     >
-                      Enregistrer la clé
+                      {config.provider === 'bedrock' ? 'Enregistrer la configuration' : 'Enregistrer la clé'}
                     </Button>
                   )}
                 </CardContent>
@@ -1112,6 +1168,85 @@ export default function AdminDashboard() {
           })}
         </div>
       </div>
+    </div>
+  );
+
+  const renderSecurityPanel = () => (
+    <div className="space-y-6 max-w-3xl">
+      <div>
+        <h2 className="text-2xl font-bold font-display tracking-tight">Sécurité</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Changez le mot de passe du compte admin actuellement connecté.
+        </p>
+      </div>
+
+      <Card className="border-primary/20 bg-primary/5">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Key className="h-5 w-5 text-primary" />
+            Changer le mot de passe
+          </CardTitle>
+          <CardDescription>
+            Le nouveau mot de passe doit comporter au moins 8 caractères et être confirmé.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-1 gap-4">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-muted-foreground uppercase" htmlFor="current-password">
+                Mot de passe actuel
+              </label>
+              <Input
+                id="current-password"
+                type="password"
+                value={passwordForm.currentPassword}
+                onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
+                placeholder="Mot de passe actuel"
+                autoComplete="current-password"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-muted-foreground uppercase" htmlFor="new-password">
+                Nouveau mot de passe
+              </label>
+              <Input
+                id="new-password"
+                type="password"
+                value={passwordForm.newPassword}
+                onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
+                placeholder="Au moins 8 caractères"
+                autoComplete="new-password"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-muted-foreground uppercase" htmlFor="confirm-password">
+                Confirmer le nouveau mot de passe
+              </label>
+              <Input
+                id="confirm-password"
+                type="password"
+                value={passwordForm.confirmPassword}
+                onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })}
+                placeholder="Répétez le nouveau mot de passe"
+                autoComplete="new-password"
+              />
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-border/60 bg-background/40 p-4 text-xs text-muted-foreground leading-relaxed">
+            Après validation, le panneau vous déconnectera pour forcer une reconnexion avec le nouveau mot de passe.
+          </div>
+
+          <div className="flex justify-end">
+            <Button onClick={handleChangePassword} disabled={savingPasswordChange} className="h-10">
+              {savingPasswordChange ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              Mettre à jour
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 
@@ -1202,6 +1337,7 @@ export default function AdminDashboard() {
         {activeSection === 'projects' && renderProjectsPanel()}
         {activeSection === 'departments' && renderDepartmentsPanel()}
         {activeSection === 'settings' && renderSettingsPanel()}
+        {activeSection === 'security' && renderSecurityPanel()}
       </main>
     </div>
   );

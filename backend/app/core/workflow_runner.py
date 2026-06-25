@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -108,6 +109,13 @@ def unsubscribe_project(project_id: str, queue: asyncio.Queue) -> None:
 def is_workflow_active(project_id: str) -> bool:
     task = ACTIVE_WORKFLOW_TASKS.get(project_id)
     return bool(task and not task.done())
+
+
+async def wait_for_workflow_to_finish(project_id: str, timeout_seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while is_workflow_active(project_id) and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+    return not is_workflow_active(project_id)
 
 
 async def request_pause(project_id: str) -> bool:

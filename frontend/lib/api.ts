@@ -140,7 +140,17 @@ export const api = {
 
     async checkAdminExists() {
       return request('/auth/me');
-    }
+    },
+    async changePassword(currentPassword: string, newPassword: string, confirmPassword: string) {
+      return request('/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+          confirm_password: confirmPassword,
+        }),
+      });
+    },
   },
 
   projects: {

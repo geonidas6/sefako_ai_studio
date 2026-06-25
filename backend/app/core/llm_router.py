@@ -1,6 +1,6 @@
 """
 LLM Router — Couche d'abstraction multi-fournisseurs.
-Supporte: Gemini, Claude (Anthropic), OpenAI/GPT, Grok (xAI), Groq, Mistral, Qwen, Mock.
+Supporte: Gemini, DeepSeek, Claude (Anthropic), OpenAI/GPT, Azure OpenAI, Bedrock, Grok (xAI), Groq, Mistral, Qwen, Mock.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, Any
 
 from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +65,11 @@ PROVIDERS = {
             "gemini-1.5-pro",
         ],
         "default_model": "gemini-3.5-flash",
+    },
+    "deepseek": {
+        "name": "DeepSeek",
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "default_model": "deepseek-v4-flash",
     },
     "anthropic": {
         "name": "Anthropic Claude",
@@ -121,6 +126,22 @@ PROVIDERS = {
         "models": ["qwen-max", "qwen-plus", "qwen-turbo", "qwen2.5-coder-32b-instruct"],
         "default_model": "qwen-max",
     },
+    "azure_openai": {
+        "name": "Azure OpenAI",
+        "models": ["gpt-5.5", "gpt-5.4-mini", "gpt-4.1", "gpt-4o", "gpt-4o-mini"],
+        "default_model": "gpt-4o",
+    },
+    "bedrock": {
+        "name": "AWS Bedrock",
+        "models": [
+            "anthropic.claude-sonnet-4-7",
+            "anthropic.claude-opus-4-7",
+            "amazon.nova-pro-v1:0",
+            "deepseek-v4-pro",
+            "openai.gpt-oss-120b",
+        ],
+        "default_model": "anthropic.claude-sonnet-4-7",
+    },
     "mock": {
         "name": "Mock (Test)",
         "models": ["mock"],
@@ -140,6 +161,7 @@ DEFAULT_ASSIGNMENTS = {
 # Conservative defaults to avoid provider-side rate limits during multi-agent runs.
 DEFAULT_REQUESTS_PER_MINUTE = {
     "gemini": 15,
+    "deepseek": 10,
     "anthropic": 5,
     "openai": 10,
     "openrouter": 5,
@@ -148,6 +170,8 @@ DEFAULT_REQUESTS_PER_MINUTE = {
     "groq": 2,
     "mistral": 10,
     "qwen": 5,
+    "azure_openai": 10,
+    "bedrock": 5,
 }
 
 _PROVIDER_RATE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -380,27 +404,18 @@ class LLMRouter:
         await self.db.commit()
         self._config_cache = {}
 
-    async def get_provider_for_agent(self, agent_type: str) -> tuple[str, str, Optional[str]]:
-        """Returns (provider, model, api_key) for an agent type."""
+    async def get_provider_details(self, provider: str) -> tuple[str, str, Optional[str]]:
+        """Return (provider, model, api_key) for a concrete provider key."""
         configs = await self._load_configs()
-
-        # Check if there's a specific assignment for this agent
-        assignment_key = f"assign_{agent_type}"
-        provider = DEFAULT_ASSIGNMENTS.get(agent_type, "gemini")
-
-        if assignment_key in configs:
-            provider = configs[assignment_key].value or provider
-
         config = configs.get(provider)
 
-        # Get API key
         api_key = None
         if config and config.api_key_encrypted:
             api_key = decrypt_api_key(config.api_key_encrypted)
         else:
-            # Fallback to env var
             env_keys = {
                 "gemini": settings.gemini_api_key,
+                "deepseek": settings.deepseek_api_key,
                 "anthropic": settings.anthropic_api_key,
                 "openai": settings.openai_api_key,
                 "openrouter": settings.openrouter_api_key,
@@ -409,6 +424,8 @@ class LLMRouter:
                 "groq": settings.groq_api_key,
                 "mistral": settings.mistral_api_key,
                 "qwen": settings.qwen_api_key,
+                "azure_openai": settings.azure_openai_api_key,
+                "bedrock": "",
             }
             api_key = env_keys.get(provider, "")
 
@@ -417,6 +434,17 @@ class LLMRouter:
             model = config.active_model
 
         return provider, model, api_key if api_key else None
+
+    async def get_provider_for_agent(self, agent_type: str) -> tuple[str, str, Optional[str]]:
+        """Returns (provider, model, api_key) for an agent type."""
+        configs = await self._load_configs()
+
+        assignment_key = f"assign_{agent_type}"
+        provider = DEFAULT_ASSIGNMENTS.get(agent_type, "gemini")
+        if assignment_key in configs:
+            provider = configs[assignment_key].value or provider
+
+        return await self.get_provider_details(provider)
 
     async def generate(self, prompt: str, agent_type: str, system_prompt: str = "") -> str:
         """Generate a response from the configured LLM provider.
@@ -431,6 +459,8 @@ class LLMRouter:
                 f"Le département {agent_type} est assigné au provider Mock. "
                 "Assignez un vrai fournisseur IA dans l'administration."
             )
+        if provider == "bedrock":
+            api_key = api_key or "__aws_bedrock__"
         if not api_key:
             if provider == "qwen" and qwen_cli_is_authenticated():
                 api_key = "__qwen_cli_auth__"
@@ -456,6 +486,67 @@ class LLMRouter:
         except Exception as e:
             provider_name = PROVIDERS.get(provider, {}).get("name", provider)
             raise RuntimeError(f"Erreur API {provider_name} ({model}) : {e}") from e
+
+    async def generate_with_fallback(
+        self,
+        prompt: str,
+        agent_type: str,
+        system_prompt: str = "",
+        fallback_providers: list[str] | None = None,
+    ) -> str:
+        """Generate a response with provider fallbacks for user-facing questions.
+
+        This keeps the strict behavior for workflow generation, but lets direct
+        user questions still receive an answer when the assigned provider is
+        temporarily unavailable or rejects a specific model.
+        """
+        primary_provider, primary_model, primary_api_key = await self.get_provider_for_agent(agent_type)
+        provider_order = [primary_provider]
+
+        for provider in fallback_providers or []:
+            if provider not in provider_order:
+                provider_order.append(provider)
+
+        errors: list[str] = []
+        for provider in provider_order:
+            if provider == "mock" or provider not in PROVIDERS:
+                continue
+
+            try:
+                _, model, api_key = await self.get_provider_details(provider)
+                if provider == primary_provider:
+                    model = primary_model
+                    api_key = primary_api_key
+
+                if provider == "bedrock":
+                    api_key = api_key or "__aws_bedrock__"
+
+                if not api_key:
+                    if provider == "qwen" and qwen_cli_is_authenticated():
+                        api_key = "__qwen_cli_auth__"
+                    else:
+                        provider_name = PROVIDERS.get(provider, {}).get("name", provider)
+                        raise RuntimeError(
+                            f"Aucune clé API configurée pour {provider_name}. "
+                            "Ajoutez une clé valide dans l'administration avant de lancer l'analyse."
+                        )
+
+                rpm = await self._get_requests_per_minute(provider)
+                timeout_seconds = await self._get_llm_timeout_seconds()
+                return await asyncio.wait_for(
+                    self._run_with_rate_limit(
+                        provider,
+                        rpm,
+                        lambda: self._call_provider(provider, model, api_key, prompt, system_prompt),
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except Exception as exc:
+                provider_name = PROVIDERS.get(provider, {}).get("name", provider)
+                errors.append(f"{provider_name} ({provider}) : {exc}")
+
+        details = " | ".join(errors[:4]) if errors else "aucun provider disponible"
+        raise RuntimeError(f"Aucune réponse automatique n'a pu être générée. Détails: {details}")
 
     async def _call_qwen_cli(self, prompt: str, system_prompt: str, model: str) -> str:
         if not qwen_cli_is_authenticated():
@@ -494,6 +585,8 @@ class LLMRouter:
     ) -> str:
         if provider == "qwen" and api_key == "__qwen_cli_auth__":
             return await self._call_qwen_cli(prompt, system_prompt, model)
+        if provider == "bedrock":
+            return await self._call_bedrock(prompt, system_prompt, model)
 
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -559,6 +652,31 @@ class LLMRouter:
                 temperature=0.4,
                 max_tokens=1800,
             )
+        elif provider == "deepseek":
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model,
+                api_key=api_key,
+                base_url="https://api.deepseek.com",
+                temperature=0.4,
+                max_tokens=1800,
+            )
+        elif provider == "azure_openai":
+            from langchain_openai import AzureChatOpenAI
+            endpoint = (settings.azure_openai_endpoint or "").strip()
+            api_version = (settings.azure_openai_api_version or "").strip()
+            if not endpoint or not api_version:
+                raise RuntimeError(
+                    "Azure OpenAI nécessite les variables AZURE_OPENAI_ENDPOINT et AZURE_OPENAI_API_VERSION côté backend."
+                )
+            llm = AzureChatOpenAI(
+                azure_endpoint=endpoint,
+                api_version=api_version,
+                azure_deployment=model,
+                api_key=api_key,
+                temperature=0.4,
+                max_tokens=1800,
+            )
         else:
             raise ValueError(f"Provider inconnu ou non supporté: {provider}")
 
@@ -567,6 +685,59 @@ class LLMRouter:
             tokens_used = self._extract_token_usage(response, prompt, system_prompt)
             await self._record_token_usage(provider, tokens_used)
         return response.content
+
+    async def _call_bedrock(self, prompt: str, system_prompt: str, model: str) -> str:
+        region = (settings.bedrock_region or "").strip()
+        if not region:
+            raise RuntimeError("AWS Bedrock nécessite la variable BEDROCK_REGION côté backend.")
+
+        import boto3
+
+        client = boto3.client("bedrock-runtime", region_name=region)
+        request: dict[str, Any] = {
+            "modelId": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"text": prompt}],
+                }
+            ],
+            "inferenceConfig": {
+                "temperature": 0.4,
+                "maxTokens": 1800,
+            },
+        }
+        if system_prompt.strip():
+            request["system"] = [{"text": system_prompt}]
+
+        try:
+            response = client.converse(**request)
+        except Exception as exc:
+            raise RuntimeError(f"Erreur AWS Bedrock ({model}) : {exc}") from exc
+
+        output = response.get("output") or {}
+        message = output.get("message") or {}
+        content = message.get("content") or []
+        texts = [str(item.get("text")) for item in content if isinstance(item, dict) and item.get("text")]
+        result = "\n".join(texts).strip()
+        if not result:
+            raise RuntimeError("AWS Bedrock n'a retourné aucune réponse exploitable.")
+
+        usage = response.get("usage") or {}
+        tokens_used = 0
+        if isinstance(usage, dict):
+            try:
+                tokens_used = int(
+                    usage.get("totalTokens")
+                    or (usage.get("inputTokens", 0) + usage.get("outputTokens", 0))
+                    or 0
+                )
+            except (TypeError, ValueError):
+                tokens_used = 0
+        if tokens_used <= 0:
+            tokens_used = self._estimate_tokens(prompt, system_prompt, result)
+        await self._record_token_usage("bedrock", tokens_used)
+        return result
 
     def _mock_response(self, agent_type: str) -> str:
         """Return a mock response for testing without API keys."""
