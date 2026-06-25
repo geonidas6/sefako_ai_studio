@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, delete
 from pydantic import BaseModel
 
-from app.core.git_publish import GitPublishError, push_workspace_to_git, set_project_git_target
+from app.core.git_publish import GitPublishError, commit_workspace_to_git, push_workspace_to_git, set_project_git_target
 from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, IMPLEMENTATION_WORKSPACE_KEY, ensure_pipeline_metadata, ensure_within_workspace, get_workspace_settings, initialize_project_workspace, refresh_project_workspace_documents, set_pipeline_phase
 from app.core.security import get_current_admin
 from app.core.llm_router import LLMRouter
@@ -316,12 +316,14 @@ class GitPushIn(BaseModel):
 
 
 class GitPublishOut(BaseModel):
+    committed: bool = False
     pushed: bool
     branch: str | None = None
     commit_sha: str | None = None
     commit_message: str | None = None
     remote_url: str | None = None
     changed_files: list[str] | None = None
+    message: str | None = None
 
 
 def project_to_dict(p: Project) -> ProjectOut:
@@ -1064,12 +1066,73 @@ async def push_project_to_git(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return GitPublishOut(
+        committed=bool(outcome.get("committed")),
         pushed=bool(outcome.get("pushed")),
         branch=outcome.get("branch"),
         commit_sha=outcome.get("commit_sha"),
         commit_message=outcome.get("commit_message"),
         remote_url=outcome.get("remote_url"),
         changed_files=outcome.get("changed_files") or [],
+        message=outcome.get("message"),
+    )
+
+
+@router.post("/{project_id}/git/commit", response_model=GitPublishOut)
+async def commit_project_to_git(
+    project_id: str,
+    body: GitPushIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    project_dir = _get_workspace_dir(project)
+    if project_dir is None or not project_dir.exists():
+        raise HTTPException(status_code=404, detail="Workspace projet introuvable")
+
+    deliverables = dict(project.final_deliverables or {})
+    git_publish = deliverables.get("git_publish")
+    if not isinstance(git_publish, dict) or not git_publish.get("target_id"):
+        raise HTTPException(status_code=400, detail="Sélectionne d'abord un repo cible dans la configuration Git.")
+
+    target_id = str(git_publish.get("target_id") or "").strip()
+    branch = (body.branch or git_publish.get("branch") or "").strip() or None
+
+    from app.models.git_integration import GitIntegration, GitRepositoryTarget
+
+    target = await db.get(GitRepositoryTarget, target_id)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=404, detail="Repo cible introuvable ou désactivé")
+
+    result = await db.execute(select(GitIntegration).order_by(GitIntegration.updated_at.desc()).limit(1))
+    integration = result.scalar_one_or_none()
+    if integration is None or not integration.is_enabled or not integration.token_encrypted:
+        raise HTTPException(status_code=400, detail="La connexion Git n'est pas configurée dans l'administration.")
+
+    try:
+        outcome = await commit_workspace_to_git(
+            db,
+            project=project,
+            project_dir=project_dir,
+            target=target,
+            integration=integration,
+            branch_override=branch,
+        )
+    except GitPublishError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return GitPublishOut(
+        committed=bool(outcome.get("committed")),
+        pushed=bool(outcome.get("pushed")),
+        branch=outcome.get("branch"),
+        commit_sha=outcome.get("commit_sha"),
+        commit_message=outcome.get("commit_message"),
+        remote_url=outcome.get("remote_url"),
+        changed_files=outcome.get("changed_files") or [],
+        message=outcome.get("message"),
     )
 
 

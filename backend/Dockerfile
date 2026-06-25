@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev curl ca-certificates nodejs npm && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev curl ca-certificates nodejs npm git && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @qwen-code/qwen-code@latest && mkdir -p /root/.qwen
 

@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -70,6 +70,13 @@ class GitHubCreateRepoState:
     clone_url: str
     html_url: str
     default_branch: str
+
+
+@dataclass
+class GitHubBranchState:
+    name: str
+    sha: str
+    protected: bool
 
 
 @dataclass
@@ -418,6 +425,75 @@ async def create_github_repository(
     )
 
 
+async def fetch_github_branches(token: str, repo_full_name: str) -> list[GitHubBranchState]:
+    normalized_repo = (repo_full_name or "").strip().strip("/")
+    if not normalized_repo or "/" not in normalized_repo:
+        raise GitPublishError("Nom complet du repo GitHub invalide.")
+
+    branches: list[GitHubBranchState] = []
+    page = 1
+    while True:
+        response = await _github_request(
+            "GET",
+            f"/repos/{normalized_repo}/branches?per_page=100&page={page}",
+            token=token,
+        )
+        if not isinstance(response, list) or not response:
+            break
+        for item in response:
+            if not isinstance(item, dict):
+                continue
+            commit = item.get("commit") if isinstance(item.get("commit"), dict) else {}
+            branches.append(GitHubBranchState(
+                name=str(item.get("name") or "").strip(),
+                sha=str(commit.get("sha") or "").strip(),
+                protected=bool(item.get("protected")),
+            ))
+        if len(response) < 100:
+            break
+        page += 1
+    return branches
+
+
+async def create_github_branch(
+    token: str,
+    *,
+    repo_full_name: str,
+    branch_name: str,
+    from_branch: str,
+) -> GitHubBranchState:
+    normalized_repo = (repo_full_name or "").strip().strip("/")
+    normalized_branch = _sanitize_branch_name(branch_name, "main")
+    source_branch = (from_branch or "").strip() or "main"
+    if not normalized_repo or "/" not in normalized_repo:
+        raise GitPublishError("Nom complet du repo GitHub invalide.")
+
+    source = await _github_request(
+        "GET",
+        f"/repos/{normalized_repo}/branches/{quote(source_branch, safe='')}",
+        token=token,
+    )
+    source_commit = source.get("commit") if isinstance(source, dict) and isinstance(source.get("commit"), dict) else {}
+    sha = str(source_commit.get("sha") or "").strip()
+    if not sha:
+        raise GitPublishError("Impossible de retrouver la branche source GitHub.")
+
+    await _github_request(
+        "POST",
+        f"/repos/{normalized_repo}/git/refs",
+        token=token,
+        payload={
+            "ref": f"refs/heads/{normalized_branch}",
+            "sha": sha,
+        },
+    )
+    return GitHubBranchState(
+        name=normalized_branch,
+        sha=sha,
+        protected=False,
+    )
+
+
 def _build_authenticated_remote_url(repo_url: str, username: str | None, token: str | None) -> str:
     candidate = (repo_url or "").strip()
     if not candidate:
@@ -442,14 +518,17 @@ def _build_authenticated_remote_url(repo_url: str, username: str | None, token: 
 
 
 async def _run_git(args: list[str], cwd: Path, *, env: dict[str, str] | None = None) -> tuple[str, str]:
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        *args,
-        cwd=str(cwd),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, **(env or {})},
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            *args,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **(env or {})},
+        )
+    except FileNotFoundError as exc:
+        raise GitPublishError("La commande git n'est pas installée sur le serveur backend.") from exc
     stdout, stderr = await process.communicate()
     out = stdout.decode(errors="ignore").strip()
     err = stderr.decode(errors="ignore").strip()
@@ -459,6 +538,8 @@ async def _run_git(args: list[str], cwd: Path, *, env: dict[str, str] | None = N
 
 
 async def _ensure_git_repository(cwd: Path, branch: str) -> None:
+    # Docker bind mounts can be owned by another uid; mark the project dir as safe for git.
+    await _run_git(["config", "--global", "--add", "safe.directory", str(cwd)], cwd)
     git_dir = cwd / ".git"
     if not git_dir.exists():
         await _run_git(["init"], cwd)
@@ -702,8 +783,34 @@ async def add_git_repo_target(
     normalized_repo_full_name = (repo_full_name or "").strip()
     if not normalized_repo_url and normalized_repo_full_name:
         normalized_repo_url = f"https://github.com/{normalized_repo_full_name}.git"
+    normalized_name = (name or "").strip()[:256]
+    if normalized_repo_url:
+        result = await db.execute(
+            select(GitRepositoryTarget).where(
+                or_(
+                    GitRepositoryTarget.repo_url == normalized_repo_url,
+                    GitRepositoryTarget.name == normalized_name,
+                )
+            ).order_by(GitRepositoryTarget.updated_at.desc()).limit(1)
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            existing.repo_url = normalized_repo_url
+            existing.name = normalized_name or existing.name
+            existing.default_branch = _sanitize_branch_name(default_branch, existing.default_branch or "main")
+            existing.is_active = True
+            existing.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            await db.refresh(existing)
+            return GitRepoTargetState(
+                id=existing.id,
+                name=existing.name,
+                repo_url=existing.repo_url,
+                default_branch=existing.default_branch,
+                is_active=bool(existing.is_active),
+            )
     target = GitRepositoryTarget(
-        name=(name or "").strip()[:256],
+        name=normalized_name,
         repo_url=normalized_repo_url,
         default_branch=_sanitize_branch_name(default_branch, "main"),
         is_active=True,
@@ -837,32 +944,36 @@ async def push_workspace_to_git(
     else:
         await _run_git(["remote", "add", "origin", remote_url], project_dir)
 
-    await _run_git(["add", "-A"], project_dir)
-    status_out, _ = await _run_git(["status", "--porcelain"], project_dir)
-    status_lines = [line for line in status_out.splitlines() if line.strip()]
-    if not status_lines:
-        return {
-            "pushed": False,
-            "changed_files": [],
-            "branch": branch,
-            "remote_url": _mask_token(target.repo_url),
-            "message": "Aucun changement à pousser.",
-        }
-
-    changed_files = []
-    for line in status_lines:
-        if len(line) > 3:
-            changed_files.append(line[3:].strip())
-
-    commit_message = await _generate_commit_message(
+    commit_outcome = await commit_workspace_to_git(
         db,
         project=project,
-        changed_files=changed_files,
-        status_lines=status_lines,
+        project_dir=project_dir,
+        target=target,
+        integration=integration,
+        branch_override=branch,
     )
+    committed_now = bool(commit_outcome.get("committed"))
+    commit_sha = str(commit_outcome.get("commit_sha") or "").strip()
+    commit_message = str(commit_outcome.get("commit_message") or "").strip()
 
-    await _run_git(["commit", "-m", commit_message], project_dir)
-    commit_sha, _ = await _run_git(["rev-parse", "HEAD"], project_dir)
+    if not commit_sha:
+        try:
+            commit_sha, _ = await _run_git(["rev-parse", "HEAD"], project_dir)
+            commit_sha = commit_sha.strip()
+        except GitPublishError:
+            return {
+                **commit_outcome,
+                "pushed": False,
+                "message": "Aucun commit local à pousser.",
+            }
+
+    if not commit_message:
+        try:
+            commit_message, _ = await _run_git(["log", "-1", "--pretty=%s"], project_dir)
+            commit_message = commit_message.strip()
+        except GitPublishError:
+            commit_message = ""
+
     await _run_git(["push", "-u", "origin", f"HEAD:{branch}"], project_dir)
 
     deliverables = dict(project.final_deliverables or {})
@@ -881,10 +992,87 @@ async def push_workspace_to_git(
     await db.commit()
 
     return {
+        "committed": committed_now,
         "pushed": True,
         "branch": branch,
         "commit_sha": commit_sha.strip(),
         "commit_message": commit_message,
         "remote_url": _mask_token(target.repo_url),
+        "changed_files": commit_outcome.get("changed_files") or [],
+        "message": "Push GitHub effectué." if not committed_now else "Commit et push GitHub effectués.",
+    }
+
+
+async def commit_workspace_to_git(
+    db: AsyncSession,
+    *,
+    project: Project,
+    project_dir: Path,
+    target: GitRepositoryTarget,
+    integration: GitIntegration,
+    branch_override: str | None = None,
+) -> dict[str, Any]:
+    if not project_dir.exists():
+        raise GitPublishError("Workspace projet introuvable.")
+
+    branch = _sanitize_branch_name(branch_override, target.default_branch or integration.default_branch or "main")
+    await _ensure_git_repository(project_dir, branch)
+
+    if not integration.email:
+        raise GitPublishError("Une adresse email Git est requise pour créer le commit.")
+
+    await _run_git(["config", "user.name", integration.username or "AIA Studio"], project_dir)
+    await _run_git(["config", "user.email", integration.email], project_dir)
+    await _run_git(["add", "-A"], project_dir)
+    status_out, _ = await _run_git(["status", "--porcelain"], project_dir)
+    status_lines = [line for line in status_out.splitlines() if line.strip()]
+    if not status_lines:
+        return {
+            "committed": False,
+            "pushed": False,
+            "changed_files": [],
+            "branch": branch,
+            "remote_url": _mask_token(target.repo_url),
+            "message": "Aucun changement à committer.",
+        }
+
+    changed_files = []
+    for line in status_lines:
+        if len(line) > 3:
+            changed_files.append(line[3:].strip())
+
+    commit_message = await _generate_commit_message(
+        db,
+        project=project,
+        changed_files=changed_files,
+        status_lines=status_lines,
+    )
+
+    await _run_git(["commit", "-m", commit_message], project_dir)
+    commit_sha, _ = await _run_git(["rev-parse", "HEAD"], project_dir)
+
+    deliverables = dict(project.final_deliverables or {})
+    git_publish = dict(deliverables.get("git_publish") or {})
+    git_publish.update({
+        "target_id": target.id,
+        "target_name": target.name,
+        "repo_url": target.repo_url,
+        "branch": branch,
+        "last_commit_sha": commit_sha.strip(),
+        "last_commit_message": commit_message,
+        "last_commit_at": datetime.now(timezone.utc).isoformat(),
+    })
+    deliverables["git_publish"] = git_publish
+    project.final_deliverables = deliverables
+    await db.commit()
+
+    return {
+        "committed": True,
+        "pushed": False,
+        "branch": branch,
+        "commit_sha": commit_sha.strip(),
+        "commit_message": commit_message,
+        "remote_url": _mask_token(target.repo_url),
         "changed_files": changed_files,
+        "message": "Commit Git créé avec succès.",
     }

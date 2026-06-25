@@ -32,11 +32,13 @@ from app.core.llm_router import (
 from app.core.git_publish import (
     add_git_repo_target,
     build_github_oauth_url,
+    create_github_branch,
     consume_github_oauth_state,
     create_github_oauth_state,
     create_github_repository,
     exchange_github_oauth_code,
     disconnect_github,
+    fetch_github_branches,
     fetch_github_repositories,
     fetch_github_user_profile,
     get_commit_message_generation_state,
@@ -208,6 +210,18 @@ class GitHubRepoCreateIn(BaseModel):
     default_branch: str = "main"
 
 
+class GitHubBranchOut(BaseModel):
+    name: str
+    sha: str
+    protected: bool = False
+
+
+class GitHubBranchCreateIn(BaseModel):
+    repo_full_name: str
+    branch_name: str
+    from_branch: str = "main"
+
+
 class GitHubOAuthStartOut(BaseModel):
     url: str
 
@@ -238,6 +252,20 @@ WORKFLOW_DEBATE_ROUNDS_KEY = "workflow_debate_rounds"
 WORKFLOW_LLM_TIMEOUT_KEY = "workflow_llm_timeout_seconds"
 WORKFLOW_FINAL_JSON_RETRY_KEY = "workflow_final_json_retry_count"
 QWEN_CONFIG_DIR = Path(os.environ.get("QWEN_CONFIG_DIR") or Path.home() / ".qwen")
+
+
+async def _require_github_token(db: AsyncSession) -> str:
+    current = await get_github_connection_state(db)
+    if not current.connected:
+        raise HTTPException(status_code=400, detail="Connecte d'abord GitHub avant de continuer.")
+
+    from app.models.git_integration import GitIntegration
+
+    result = await db.execute(select(GitIntegration).order_by(GitIntegration.updated_at.desc()).limit(1))
+    integration_row = result.scalar_one_or_none()
+    if integration_row is None or not integration_row.token_encrypted:
+        raise HTTPException(status_code=400, detail="Token GitHub introuvable.")
+    return decrypt_api_key(integration_row.token_encrypted)
 QWEN_SETTINGS_FILE = QWEN_CONFIG_DIR / "settings.json"
 
 
@@ -407,7 +435,7 @@ async def get_git_settings(
             username=connection.login,
             email=connection.email,
             connected=connection.connected,
-            has_token=connection.has_token,
+            has_token=connection.connected,
             default_branch=connection.default_branch,
             is_enabled=connection.connected,
         ),
@@ -594,16 +622,7 @@ async def list_github_repositories(
     db: AsyncSession = Depends(get_db),
     _: object = Depends(get_current_admin),
 ):
-    current = await get_github_connection_state(db)
-    if not current.connected:
-        raise HTTPException(status_code=400, detail="Connecte d'abord GitHub avant de charger les repos.")
-    from app.models.git_integration import GitIntegration
-    result2 = await db.execute(select(GitIntegration).order_by(GitIntegration.updated_at.desc()).limit(1))
-    integration_row = result2.scalar_one_or_none()
-    if integration_row is None or not integration_row.token_encrypted:
-        raise HTTPException(status_code=400, detail="Token GitHub introuvable.")
-    from app.core.llm_router import decrypt_api_key
-    token = decrypt_api_key(integration_row.token_encrypted)
+    token = await _require_github_token(db)
     try:
         repos = await fetch_github_repositories(token)
     except Exception as exc:
@@ -622,24 +641,34 @@ async def list_github_repositories(
     ]
 
 
+@router.get("/github/branches", response_model=list[GitHubBranchOut])
+async def list_github_repo_branches(
+    repo_full_name: str,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    token = await _require_github_token(db)
+    try:
+        branches = await fetch_github_branches(token, repo_full_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [
+        GitHubBranchOut(
+            name=item.name,
+            sha=item.sha,
+            protected=item.protected,
+        )
+        for item in branches
+    ]
+
+
 @router.post("/github/repos", response_model=GitHubRepoOut)
 async def create_github_repository_endpoint(
     body: GitHubRepoCreateIn,
     db: AsyncSession = Depends(get_db),
     _: object = Depends(get_current_admin),
 ):
-    current = await get_github_connection_state(db)
-    if not current.connected:
-        raise HTTPException(status_code=400, detail="Connecte d'abord GitHub avant de créer un repo.")
-
-    from app.models.git_integration import GitIntegration
-    result = await db.execute(select(GitIntegration).order_by(GitIntegration.updated_at.desc()).limit(1))
-    integration_row = result.scalar_one_or_none()
-    if integration_row is None or not integration_row.token_encrypted:
-        raise HTTPException(status_code=400, detail="Token GitHub introuvable.")
-    from app.core.llm_router import decrypt_api_key
-    token = decrypt_api_key(integration_row.token_encrypted)
-
+    token = await _require_github_token(db)
     try:
         created = await create_github_repository(
             token,
@@ -663,6 +692,29 @@ async def create_github_repository_endpoint(
         description=body.description,
         private=body.private,
         default_branch=target.default_branch,
+    )
+
+
+@router.post("/github/branches", response_model=GitHubBranchOut)
+async def create_github_branch_endpoint(
+    body: GitHubBranchCreateIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    token = await _require_github_token(db)
+    try:
+        branch = await create_github_branch(
+            token,
+            repo_full_name=body.repo_full_name.strip(),
+            branch_name=body.branch_name.strip(),
+            from_branch=body.from_branch.strip() or "main",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return GitHubBranchOut(
+        name=branch.name,
+        sha=branch.sha,
+        protected=branch.protected,
     )
 
 

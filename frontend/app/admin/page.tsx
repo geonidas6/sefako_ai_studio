@@ -22,6 +22,7 @@ import {
   Loader2,
   ExternalLink,
   GitBranch,
+  Sparkles,
   Link2,
   RefreshCw,
   Plus,
@@ -113,30 +114,14 @@ interface GitConnection {
   is_enabled: boolean;
 }
 
-interface GitRepoTarget {
-  id: string;
-  name: string;
-  repo_url: string;
-  default_branch: string;
-  is_active: boolean;
-}
-
 interface GitSettings {
   connection: GitConnection;
-  repo_targets: GitRepoTarget[];
   github_oauth_client_id?: string | null;
   has_github_oauth_client_secret?: boolean;
   github_oauth_source?: string;
-}
-
-interface GitHubRepo {
-  name: string;
-  full_name: string;
-  clone_url: string;
-  html_url: string;
-  description: string | null;
-  private: boolean;
-  default_branch: string;
+  commit_message_provider?: string;
+  commit_message_model?: string;
+  commit_message_source?: string;
 }
 
 interface QwenAuthStatus {
@@ -191,10 +176,12 @@ export default function AdminDashboard() {
       default_branch: 'main',
       is_enabled: false,
     },
-    repo_targets: [],
     github_oauth_client_id: '',
     has_github_oauth_client_secret: false,
     github_oauth_source: 'environment',
+    commit_message_provider: 'gemini',
+    commit_message_model: '',
+    commit_message_source: 'default',
   });
   const [githubOAuthForm, setGithubOAuthForm] = useState({
     client_id: '',
@@ -202,13 +189,8 @@ export default function AdminDashboard() {
     has_client_secret: false,
     source: 'environment',
   });
-  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
-  const [loadingGitHubRepos, setLoadingGitHubRepos] = useState(false);
   const [startingGitHubAuth, setStartingGitHubAuth] = useState(false);
   const [disconnectingGitHub, setDisconnectingGitHub] = useState(false);
-  const [savingNewGitRepo, setSavingNewGitRepo] = useState(false);
-  const [creatingGitHubRepo, setCreatingGitHubRepo] = useState(false);
-  const [newGitHubRepo, setNewGitHubRepo] = useState({ name: '', description: '', private: true });
   const [qwenAuth, setQwenAuth] = useState<QwenAuthStatus>({ authenticated: false, method: 'none' });
   const [startingQwenAuth, setStartingQwenAuth] = useState(false);
   const [savingQwenCliKey, setSavingQwenCliKey] = useState(false);
@@ -269,7 +251,17 @@ export default function AdminDashboard() {
       if (workflowSettingsData.status === 'fulfilled') setWorkflowSettings(workflowSettingsData.value);
       if (generationSettingsData.status === 'fulfilled') setGenerationSettings(generationSettingsData.value);
       if (gitSettingsData.status === 'fulfilled') {
-        setGitSettings(gitSettingsData.value);
+        const commitProvider = gitSettingsData.value.commit_message_provider || 'gemini';
+        const providerConfig = configsData.status === 'fulfilled'
+          ? configsData.value.find((config: ProviderConfig) => config.provider === commitProvider)
+            || configsData.value.find((config: ProviderConfig) => config.provider !== 'mock')
+          : null;
+        setGitSettings({
+          ...gitSettingsData.value,
+          commit_message_provider: commitProvider,
+          commit_message_model: gitSettingsData.value.commit_message_model || providerConfig?.models?.[0] || '',
+          commit_message_source: gitSettingsData.value.commit_message_source || 'default',
+        });
         setGithubOAuthForm({
           client_id: gitSettingsData.value.github_oauth_client_id || '',
           client_secret: '',
@@ -278,15 +270,6 @@ export default function AdminDashboard() {
         });
       }
       if (qwenAuthData.status === 'fulfilled') setQwenAuth(qwenAuthData.value);
-
-      if (gitSettingsData.status === 'fulfilled' && gitSettingsData.value?.connection?.connected) {
-        try {
-          const repos = await api.admin.getGitHubRepos();
-          setGithubRepos(repos);
-        } catch {
-          // GitHub repo list is optional until connected
-        }
-      }
 
       if (githubRedirectStatus === 'connected') {
         setSuccessMsg('GitHub connecté avec succès.');
@@ -300,7 +283,7 @@ export default function AdminDashboard() {
       setLoading(false);
     }
     loadAdminData();
-  }, [router]);
+  }, [router, searchParams]);
 
   useEffect(() => {
     const handleAuthExpired = () => {
@@ -651,18 +634,19 @@ export default function AdminDashboard() {
 
   const refreshGitHubState = async () => {
     try {
-      const [status, repos, settings] = await Promise.allSettled([
+      const [status, settings] = await Promise.allSettled([
         api.admin.getGitHubStatus(),
-        api.admin.getGitHubRepos(),
         api.admin.getGitSettings(),
       ]);
       if (status.status === 'fulfilled') setGitSettings((current) => ({
         ...current,
         connection: { ...current.connection, ...status.value },
       }));
-      if (repos.status === 'fulfilled') setGithubRepos(repos.value);
       if (settings.status === 'fulfilled') {
-        setGitSettings(settings.value);
+        setGitSettings((current) => ({
+          ...current,
+          ...settings.value,
+        }));
         setGithubOAuthForm({
           client_id: settings.value.github_oauth_client_id || '',
           client_secret: '',
@@ -691,27 +675,12 @@ export default function AdminDashboard() {
           is_enabled: false,
         },
       }));
-      setGithubRepos([]);
       setSuccessMsg('Compte GitHub déconnecté.');
       setTimeout(() => setSuccessMsg(''), 4000);
     } catch (err: any) {
       setError(err.message || 'Impossible de déconnecter GitHub.');
     } finally {
       setDisconnectingGitHub(false);
-    }
-  };
-
-  const handleRefreshGitHubRepos = async () => {
-    setError('');
-    setSuccessMsg('');
-    setLoadingGitHubRepos(true);
-    try {
-      const repos = await api.admin.getGitHubRepos();
-      setGithubRepos(repos);
-    } catch (err: any) {
-      setError(err.message || 'Impossible de charger les repos GitHub.');
-    } finally {
-      setLoadingGitHubRepos(false);
     }
   };
 
@@ -737,53 +706,31 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleImportGitHubRepo = async (repo: GitHubRepo) => {
+  const handleSaveCommitMessageSettings = async () => {
     setError('');
     setSuccessMsg('');
-    setSavingNewGitRepo(true);
-    try {
-      const response = await api.admin.createGitRepoTarget({
-        name: repo.name,
-        repo_full_name: repo.full_name,
-        default_branch: repo.default_branch || 'main',
-      });
-      setGitSettings((current) => ({
-        ...current,
-        repo_targets: [response, ...current.repo_targets],
-      }));
-      setSuccessMsg(`Repo importé: ${repo.full_name}`);
-      setTimeout(() => setSuccessMsg(''), 4000);
-    } catch (err: any) {
-      setError(err.message || 'Impossible d’importer le repo GitHub.');
-    } finally {
-      setSavingNewGitRepo(false);
-    }
-  };
-
-  const handleCreateGitHubRepo = async () => {
-    setError('');
-    setSuccessMsg('');
-    if (!newGitHubRepo.name.trim()) {
-      setError('Le nom du nouveau repo est requis.');
+    const provider = (gitSettings.commit_message_provider || '').trim();
+    const model = (gitSettings.commit_message_model || '').trim();
+    if (!provider) {
+      setError('Le provider du message de commit est requis.');
       return;
     }
-
-    setCreatingGitHubRepo(true);
+    if (!model) {
+      setError('Le modèle du message de commit est requis.');
+      return;
+    }
     try {
-      await api.admin.createGitHubRepo({
-        name: newGitHubRepo.name.trim(),
-        description: newGitHubRepo.description.trim() || undefined,
-        private: newGitHubRepo.private,
-        default_branch: gitSettings.connection.default_branch || 'main',
-      });
-      await refreshGitHubState();
-      setNewGitHubRepo({ name: '', description: '', private: true });
-      setSuccessMsg('Repo GitHub créé et ajouté au studio.');
-      setTimeout(() => setSuccessMsg(''), 5000);
+      const response = await api.admin.updateCommitMessageSettings({ provider, model });
+      setGitSettings((current) => ({
+        ...current,
+        commit_message_provider: response.provider,
+        commit_message_model: response.model,
+        commit_message_source: response.source,
+      }));
+      setSuccessMsg('Configuration du message de commit enregistrée.');
+      setTimeout(() => setSuccessMsg(''), 4000);
     } catch (err: any) {
-      setError(err.message || 'Impossible de créer le repo GitHub.');
-    } finally {
-      setCreatingGitHubRepo(false);
+      setError(err.message || 'Erreur lors de la sauvegarde de la configuration du message de commit.');
     }
   };
 
@@ -1469,7 +1416,13 @@ export default function AdminDashboard() {
     </div>
   );
 
-  const renderGitPanel = () => (
+  const renderGitPanel = () => {
+    const commitProviderConfig = configs.find((config) => config.provider === gitSettings.commit_message_provider)
+      || configs.find((config) => config.provider !== 'mock')
+      || configs[0];
+    const commitProviderModels = commitProviderConfig?.models || [];
+
+    return (
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold font-display tracking-tight flex items-center gap-2">
@@ -1524,6 +1477,80 @@ export default function AdminDashboard() {
             <Button onClick={handleSaveGitHubOAuthConfig} className="h-10">
               <Save className="mr-2 h-4 w-4" />
               Enregistrer OAuth
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-border/60">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-primary" />
+            Message de commit IA
+          </CardTitle>
+          <CardDescription>
+            Choisis quel provider et quel modèle doivent générer le message de commit avant le push Git.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Provider</label>
+              <select
+                value={gitSettings.commit_message_provider || 'gemini'}
+                onChange={(event) => {
+                  const provider = event.target.value;
+                  const providerConfig = configs.find((config) => config.provider === provider) || configs.find((config) => config.provider !== 'mock');
+                  const nextModel = providerConfig?.models?.[0] || '';
+                  setGitSettings((current) => ({
+                    ...current,
+                    commit_message_provider: provider,
+                    commit_message_model: nextModel,
+                  }));
+                }}
+                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+              >
+                {configs.filter((config) => config.provider !== 'mock').map((config) => (
+                  <option key={config.provider} value={config.provider}>
+                    {config.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Modèle</label>
+              <select
+                value={gitSettings.commit_message_model || ''}
+                onChange={(event) => setGitSettings((current) => ({
+                  ...current,
+                  commit_message_model: event.target.value,
+                }))}
+                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+              >
+                {commitProviderModels.length === 0 ? (
+                  <option value="">Aucun modèle</option>
+                ) : (
+                  commitProviderModels.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-background/50 p-4 text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">
+            <span>
+              Source actuelle : <strong className="text-foreground">{gitSettings.commit_message_source || 'default'}</strong>
+            </span>
+            <span>
+              Valeur: <strong className="text-foreground">{gitSettings.commit_message_provider || 'gemini'} / {gitSettings.commit_message_model || 'auto'}</strong>
+            </span>
+          </div>
+          <div className="flex justify-end">
+            <Button onClick={handleSaveCommitMessageSettings} className="h-10">
+              <Save className="mr-2 h-4 w-4" />
+              Enregistrer le commit IA
             </Button>
           </div>
         </CardContent>
@@ -1608,143 +1635,25 @@ export default function AdminDashboard() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <Card className="border-border/60">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <Link2 className="h-5 w-5 text-primary" />
-              Créer un repo GitHub
-            </CardTitle>
-            <CardDescription>
-              Crée un dépôt distant via l’API GitHub, puis ajoute-le automatiquement comme cible du studio.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Nom du repo</label>
-              <Input
-                value={newGitHubRepo.name}
-                onChange={(event) => setNewGitHubRepo({ ...newGitHubRepo, name: event.target.value })}
-                placeholder="site-vitrine-client"
-                className="h-11"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Description</label>
-              <Input
-                value={newGitHubRepo.description}
-                onChange={(event) => setNewGitHubRepo({ ...newGitHubRepo, description: event.target.value })}
-                placeholder="Repo généré depuis AIA Studio"
-                className="h-11"
-              />
-            </div>
-            <label className="flex items-start gap-3 rounded-xl border border-border/60 bg-background/50 p-4 text-sm">
-              <input
-                type="checkbox"
-                checked={newGitHubRepo.private}
-                onChange={(event) => setNewGitHubRepo({ ...newGitHubRepo, private: event.target.checked })}
-                className="mt-1 h-4 w-4 rounded border-border bg-background"
-              />
-              <span className="text-muted-foreground">Créer le repo en privé.</span>
-            </label>
-            <div className="flex justify-end">
-              <Button onClick={handleCreateGitHubRepo} disabled={creatingGitHubRepo} className="h-10">
-                {creatingGitHubRepo ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-                Créer et importer
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-border/60">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <GitBranch className="h-4 w-4 text-primary" /> Repos GitHub
-            </CardTitle>
-            <CardDescription>Repos accessibles sur le compte connecté. Clique pour les importer dans le studio.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex justify-end">
-              <Button variant="outline" size="sm" onClick={handleRefreshGitHubRepos} disabled={loadingGitHubRepos} className="h-9">
-                {loadingGitHubRepos ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-2 h-3 w-3" />}
-                Rafraîchir
-              </Button>
-            </div>
-            {githubRepos.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border/60 bg-muted/20 p-6 text-center">
-                <p className="font-semibold">Aucun repo GitHub visible</p>
-                <p className="mt-1 text-sm text-muted-foreground">Connecte GitHub puis rafraîchis la liste pour voir les dépôts du compte.</p>
-              </div>
-            ) : githubRepos.map((repo) => (
-              <div key={repo.full_name} className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="font-semibold truncate">{repo.full_name}</p>
-                      <span className={cn(
-                        'shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest',
-                        repo.private ? 'border-primary/20 bg-primary/10 text-primary' : 'border-border/60 bg-background text-muted-foreground'
-                      )}>
-                        {repo.private ? 'Private' : 'Public'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-muted-foreground break-words">{repo.description || 'Sans description'}</p>
-                  </div>
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{repo.default_branch}</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button asChild variant="outline" size="sm" className="h-8">
-                    <a href={repo.html_url} target="_blank" rel="noreferrer">Ouvrir</a>
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleImportGitHubRepo(repo)}
-                    disabled={savingNewGitRepo}
-                    className="h-8"
-                  >
-                    {savingNewGitRepo ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : <Plus className="mr-2 h-3 w-3" />}
-                    Ajouter au studio
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      </div>
-
       <Card className="border-border/60">
         <CardHeader>
-          <CardTitle className="text-lg">Repos importés dans le studio</CardTitle>
-          <CardDescription>Ce sont les cibles sélectionnables depuis les projets pour les pushes GitHub.</CardDescription>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <GitBranch className="h-5 w-5 text-primary" />
+            GitHub Summary
+          </CardTitle>
+          <CardDescription>
+            Connexion GitHub active pour les pushes depuis les projets. Les options d'import de repos ont été retirées du panel admin.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {gitSettings.repo_targets.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border/60 bg-muted/20 p-6 text-center">
-              <p className="font-semibold">Aucun repo importé</p>
-              <p className="mt-1 text-sm text-muted-foreground">Importe un repo GitHub pour qu’il soit disponible dans les projets.</p>
-            </div>
-          ) : gitSettings.repo_targets.map((repo) => (
-            <div key={repo.id} className="rounded-xl border border-border/60 bg-muted/20 p-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-              <div className="min-w-0">
-                <p className="font-semibold truncate">{repo.name}</p>
-                <p className="text-xs text-muted-foreground font-mono break-all">{repo.repo_url}</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{repo.default_branch}</span>
-                <span className={cn(
-                  'rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest',
-                  repo.is_active ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500' : 'border-border/60 bg-muted text-muted-foreground'
-                )}>
-                  {repo.is_active ? 'Actif' : 'Inactif'}
-                </span>
-              </div>
-            </div>
-          ))}
+          <div className="rounded-xl border border-border/60 bg-background/60 p-4 text-sm text-muted-foreground">
+            Les dépôts cibles sont gérés côté projet via la liste GitHub déjà liée au compte connecté.
+          </div>
         </CardContent>
       </Card>
     </div>
-  );
+    );
+  };
 
   const renderSecurityPanel = () => (
     <div className="space-y-6 max-w-3xl">

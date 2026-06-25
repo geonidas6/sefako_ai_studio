@@ -35,6 +35,7 @@ import {
   FolderPlus,
   Folder,
   FileCode2,
+  Plus,
 } from 'lucide-react';
 import { api } from '../../../lib/api';
 import { connectProjectWs, WsEvent } from '../../../lib/websocket';
@@ -107,9 +108,36 @@ interface GitRepoTarget {
   is_active: boolean;
 }
 
+interface GitHubRepo {
+  name: string;
+  full_name: string;
+  clone_url: string;
+  html_url: string;
+  description: string | null;
+  private: boolean;
+  default_branch: string;
+}
+
+interface GitHubBranch {
+  name: string;
+  sha: string;
+  protected: boolean;
+}
+
 interface GitSettings {
   connection: GitConnection;
   repo_targets: GitRepoTarget[];
+}
+
+interface GitActionResult {
+  committed: boolean;
+  pushed: boolean;
+  branch: string | null;
+  commit_sha: string | null;
+  commit_message: string | null;
+  remote_url: string | null;
+  changed_files: string[];
+  message: string | null;
 }
 
 declare global {
@@ -299,8 +327,19 @@ export default function ProjectDashboard() {
     },
     repo_targets: [],
   });
+  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
+  const [githubBranches, setGithubBranches] = useState<GitHubBranch[]>([]);
+  const [loadingGitBranches, setLoadingGitBranches] = useState(false);
   const [selectedGitTargetId, setSelectedGitTargetId] = useState('');
   const [selectedGitBranch, setSelectedGitBranch] = useState('');
+  const [newGitHubRepo, setNewGitHubRepo] = useState({ name: '', description: '', private: false });
+  const [creatingGitHubRepo, setCreatingGitHubRepo] = useState(false);
+  const [newGitBranchName, setNewGitBranchName] = useState('');
+  const [creatingGitBranch, setCreatingGitBranch] = useState(false);
+  const [gitActionModalOpen, setGitActionModalOpen] = useState(false);
+  const [gitActionType, setGitActionType] = useState<'commit' | 'push'>('push');
+  const [runningGitAction, setRunningGitAction] = useState(false);
+  const [gitActionResult, setGitActionResult] = useState<GitActionResult | null>(null);
   const [startingTechnicalDesign, setStartingTechnicalDesign] = useState(false);
   const [startingImplementation, setStartingImplementation] = useState(false);
   const [workspaceFiles, setWorkspaceFiles] = useState<{ path: string; name: string; is_dir?: boolean; kind?: string }[]>([]);
@@ -313,8 +352,6 @@ export default function ProjectDashboard() {
   const [creatingWorkspaceEntry, setCreatingWorkspaceEntry] = useState(false);
   const [newWorkspacePath, setNewWorkspacePath] = useState('');
   const [workspaceMovePath, setWorkspaceMovePath] = useState('');
-  const [loadingGitPush, setLoadingGitPush] = useState(false);
-
   const [logs, setLogs] = useState<{ text: string; type?: 'info' | 'success' | 'error' | 'system' }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatMode, setChatMode] = useState<'question' | 'correction'>('correction');
@@ -388,6 +425,7 @@ export default function ProjectDashboard() {
     setIsAdminSession(true);
     api.admin.getGenerationSettings().then(setGenerationSettings).catch(() => {});
     api.admin.getGitSettings().then(setGitSettings).catch(() => {});
+    api.admin.getGitHubRepos().then(setGithubRepos).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -400,21 +438,185 @@ export default function ProjectDashboard() {
     }
   }, [project?.final_deliverables?.git_publish]);
 
-  useEffect(() => {
-    if (selectedGitTargetId) return;
-    const firstTarget = gitSettings.repo_targets[0];
-    if (!firstTarget) return;
-    setSelectedGitTargetId(firstTarget.id);
-    setSelectedGitBranch(firstTarget.default_branch || gitSettings.connection.default_branch || 'main');
-  }, [gitSettings.repo_targets, gitSettings.connection.default_branch, selectedGitTargetId]);
+  const availableGitTargets = (() => {
+    const options: { value: string; label: string; default_branch: string; repo_url: string; existingTargetId?: string; repoFullName?: string }[] = [];
+    const seenRepoUrls = new Set<string>();
+    const seenOptionKeys = new Set<string>();
+
+    for (const target of gitSettings.repo_targets) {
+      const repoUrl = String(target.repo_url || '').trim();
+      const repoFullName = repoUrl.match(/github\.com\/([^/]+\/[^/.]+)(?:\.git)?$/i)?.[1] || undefined;
+      const optionKey = (repoFullName || repoUrl || target.name).toLowerCase();
+      if (optionKey && seenOptionKeys.has(optionKey)) continue;
+      options.push({
+        value: target.id,
+        label: target.name,
+        default_branch: target.default_branch || gitSettings.connection.default_branch || 'main',
+        repo_url: repoUrl,
+        existingTargetId: target.id,
+        repoFullName,
+      });
+      if (repoUrl) seenRepoUrls.add(repoUrl.toLowerCase());
+      if (optionKey) seenOptionKeys.add(optionKey);
+    }
+
+    for (const repo of githubRepos) {
+      const repoUrl = String(repo.clone_url || '').trim();
+      if (repoUrl && seenRepoUrls.has(repoUrl.toLowerCase())) continue;
+      const optionKey = (repo.full_name || repoUrl || repo.name).toLowerCase();
+      if (optionKey && seenOptionKeys.has(optionKey)) continue;
+      options.push({
+        value: `github:${repo.full_name}`,
+        label: repo.full_name,
+        default_branch: repo.default_branch || gitSettings.connection.default_branch || 'main',
+        repo_url: repoUrl,
+        repoFullName: repo.full_name,
+      });
+      if (optionKey) seenOptionKeys.add(optionKey);
+    }
+
+    return options;
+  })();
+
+  const selectedGitTarget = availableGitTargets.find((item) => item.value === selectedGitTargetId) || null;
+  const selectedRepoFullName = selectedGitTarget?.repoFullName || null;
 
   useEffect(() => {
-    const target = gitSettings.repo_targets.find((item) => item.id === selectedGitTargetId);
+    if (selectedGitTargetId) return;
+    const firstTarget = availableGitTargets[0];
+    if (!firstTarget) return;
+    setSelectedGitTargetId(firstTarget.value);
+    setSelectedGitBranch(firstTarget.default_branch || gitSettings.connection.default_branch || 'main');
+  }, [availableGitTargets, gitSettings.connection.default_branch, selectedGitTargetId]);
+
+  useEffect(() => {
+    const target = availableGitTargets.find((item) => item.value === selectedGitTargetId);
     if (!target) return;
     if (!selectedGitBranch) {
       setSelectedGitBranch(target.default_branch || gitSettings.connection.default_branch || 'main');
     }
-  }, [selectedGitTargetId, gitSettings.repo_targets, gitSettings.connection.default_branch, selectedGitBranch]);
+  }, [selectedGitTargetId, availableGitTargets, gitSettings.connection.default_branch, selectedGitBranch]);
+
+  useEffect(() => {
+    if (!isAdminSession || !selectedRepoFullName) {
+      setGithubBranches([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingGitBranches(true);
+    api.admin.getGitHubBranches(selectedRepoFullName)
+      .then((branches) => {
+        if (cancelled) return;
+        setGithubBranches(Array.isArray(branches) ? branches : []);
+      })
+      .catch(() => {
+        if (!cancelled) setGithubBranches([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingGitBranches(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdminSession, selectedRepoFullName]);
+
+  const persistGitSelection = async (targetValue?: string, branchValue?: string) => {
+    const nextTargetValue = targetValue ?? selectedGitTargetId;
+    const nextBranchValue = branchValue ?? selectedGitBranch;
+    if (!nextTargetValue) return null;
+
+    const selectedOption = availableGitTargets.find((item) => item.value === nextTargetValue);
+    if (!selectedOption) return null;
+
+    let targetId = selectedOption.existingTargetId || null;
+    if (!targetId) {
+      const repo = githubRepos.find((item) => `github:${item.full_name}` === nextTargetValue);
+      if (!repo) return null;
+      const createdTarget = await api.admin.createGitRepoTarget({
+        name: repo.name,
+        repo_full_name: repo.full_name,
+        default_branch: repo.default_branch || gitSettings.connection.default_branch || 'main',
+      });
+      setGitSettings((current) => ({
+        ...current,
+        repo_targets: [createdTarget, ...current.repo_targets],
+      }));
+      targetId = createdTarget.id;
+      setSelectedGitTargetId(createdTarget.id);
+    }
+    if (!targetId) return null;
+
+    const selection = await api.projects.updateGitTarget(projectId, targetId, nextBranchValue || selectedOption.default_branch || undefined);
+    const gitPublish = selection?.git_publish || {};
+    setProject((current: any) => current ? {
+      ...current,
+      final_deliverables: {
+        ...(current.final_deliverables || {}),
+        git_publish: gitPublish,
+      },
+    } : current);
+    return targetId;
+  };
+
+  const handleCreateGitHubRepo = async () => {
+    const name = newGitHubRepo.name.trim();
+    if (!name) {
+      setLogs((prev) => [...prev, { text: 'Le nom du nouveau repo est requis.', type: 'error' }]);
+      return;
+    }
+    setCreatingGitHubRepo(true);
+    try {
+      const created = await api.admin.createGitHubRepo({
+        name,
+        description: newGitHubRepo.description.trim() || undefined,
+        private: newGitHubRepo.private,
+        default_branch: gitSettings.connection.default_branch || 'main',
+      });
+      setGithubRepos((current) => [created, ...current.filter((item) => item.full_name !== created.full_name)]);
+      setSelectedGitTargetId(`github:${created.full_name}`);
+      setSelectedGitBranch(created.default_branch || 'main');
+      setNewGitHubRepo({ name: '', description: '', private: false });
+      await persistGitSelection(`github:${created.full_name}`, created.default_branch || 'main');
+      setLogs((prev) => [...prev, { text: `Repo GitHub créé: ${created.full_name}.`, type: 'success' }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible de créer le repo GitHub.', type: 'error' }]);
+    } finally {
+      setCreatingGitHubRepo(false);
+    }
+  };
+
+  const handleCreateGitBranch = async () => {
+    const branchName = newGitBranchName.trim();
+    if (!selectedRepoFullName) {
+      setLogs((prev) => [...prev, { text: 'Sélectionne d’abord un repo GitHub.', type: 'error' }]);
+      return;
+    }
+    if (!branchName) {
+      setLogs((prev) => [...prev, { text: 'Le nom de la nouvelle branche est requis.', type: 'error' }]);
+      return;
+    }
+    setCreatingGitBranch(true);
+    try {
+      const created = await api.admin.createGitHubBranch({
+        repo_full_name: selectedRepoFullName,
+        branch_name: branchName,
+        from_branch: selectedGitBranch || selectedGitTarget?.default_branch || gitSettings.connection.default_branch || 'main',
+      });
+      setGithubBranches((current) => {
+        const next = [created, ...current.filter((item) => item.name !== created.name)];
+        next.sort((a, b) => a.name.localeCompare(b.name));
+        return next;
+      });
+      setSelectedGitBranch(created.name);
+      setNewGitBranchName('');
+      await persistGitSelection(selectedGitTargetId, created.name);
+      setLogs((prev) => [...prev, { text: `Branche créée: ${created.name}.`, type: 'success' }]);
+    } catch (err: any) {
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible de créer la branche GitHub.', type: 'error' }]);
+    } finally {
+      setCreatingGitBranch(false);
+    }
+  };
 
   useEffect(() => {
     const workspaceProjectDir = project?.final_deliverables?.implementation_workspace?.project_dir;
@@ -667,38 +869,52 @@ export default function ProjectDashboard() {
     }
   };
 
-  const handlePushToGit = async () => {
+  const openGitActionModal = (action: 'commit' | 'push') => {
     if (!isAdminSession) return;
     if (!selectedGitTargetId) {
       setLogs((prev) => [...prev, { text: 'Sélectionne d’abord un repo cible.', type: 'error' }]);
       return;
     }
-    setLoadingGitPush(true);
-    try {
-      const selection = await api.projects.updateGitTarget(projectId, selectedGitTargetId, selectedGitBranch || undefined);
-      const gitPublish = selection?.git_publish || {};
-      setProject((current: any) => current ? {
-        ...current,
-        final_deliverables: {
-          ...(current.final_deliverables || {}),
-          git_publish: gitPublish,
-        },
-      } : current);
+    setGitActionType(action);
+    setGitActionResult(null);
+    setGitActionModalOpen(true);
+  };
 
-      const pushResult = await api.projects.pushToGit(projectId, selectedGitBranch || undefined);
-      const branch = String(pushResult?.branch || selectedGitBranch || '').trim();
-      const commitMessage = String(pushResult?.commit_message || '').trim();
-      const commitSha = String(pushResult?.commit_sha || '').trim();
+  const handleConfirmGitAction = async () => {
+    setRunningGitAction(true);
+    try {
+      await persistGitSelection();
+      const result = gitActionType === 'commit'
+        ? await api.projects.commitToGit(projectId, selectedGitBranch || undefined)
+        : await api.projects.pushToGit(projectId, selectedGitBranch || undefined);
+      setGitActionResult({
+        committed: Boolean(result?.committed),
+        pushed: Boolean(result?.pushed),
+        branch: result?.branch || selectedGitBranch || null,
+        commit_sha: result?.commit_sha || null,
+        commit_message: result?.commit_message || null,
+        remote_url: result?.remote_url || null,
+        changed_files: Array.isArray(result?.changed_files) ? result.changed_files : [],
+        message: result?.message || null,
+      });
       setLogs((prev) => [...prev, {
-        text: pushResult?.pushed
-          ? `Push Git réussi${commitSha ? ` (${commitSha.slice(0, 8)})` : ''}${branch ? ` sur ${branch}` : ''}${commitMessage ? ` - ${commitMessage}` : ''}.`
-          : 'Aucun changement à pousser.',
-        type: pushResult?.pushed ? 'success' : 'info',
+        text: String(result?.message || (gitActionType === 'commit' ? 'Commit Git terminé.' : 'Push Git terminé.')),
+        type: result?.pushed || result?.committed ? 'success' : 'info',
       }]);
     } catch (err: any) {
-      setLogs((prev) => [...prev, { text: err.message || 'Impossible de pousser vers Git.', type: 'error' }]);
+      setGitActionResult({
+        committed: false,
+        pushed: false,
+        branch: selectedGitBranch || null,
+        commit_sha: null,
+        commit_message: null,
+        remote_url: null,
+        changed_files: [],
+        message: err.message || `Impossible de ${gitActionType === 'commit' ? 'committer' : 'pousser'} vers Git.`,
+      });
+      setLogs((prev) => [...prev, { text: err.message || `Impossible de ${gitActionType === 'commit' ? 'committer' : 'pousser'} vers Git.`, type: 'error' }]);
     } finally {
-      setLoadingGitPush(false);
+      setRunningGitAction(false);
     }
   };
 
@@ -1333,41 +1549,106 @@ export default function ProjectDashboard() {
                 <p><strong>Racine :</strong> <code>{workspaceInfo.root_path}</code></p>
                 <p><strong>Fichiers initialisés :</strong> {Array.isArray(workspaceInfo.files) ? workspaceInfo.files.length : 0}</p>
                 {isAdminSession && (
-                  <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] gap-3 rounded-xl border border-border/60 bg-background/80 p-3">
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Repo cible</label>
-                      <select
-                        value={selectedGitTargetId}
-                        onChange={(event) => {
-                          const targetId = event.target.value;
-                          setSelectedGitTargetId(targetId);
-                          const target = gitSettings.repo_targets.find((item) => item.id === targetId);
-                          if (target) {
-                            setSelectedGitBranch(target.default_branch || gitSettings.connection.default_branch || 'main');
-                          }
-                        }}
-                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-                      >
-                        {gitSettings.repo_targets.length === 0 ? (
-                          <option value="">Aucun repo configuré</option>
-                        ) : (
-                          gitSettings.repo_targets.map((repo) => (
-                            <option key={repo.id} value={repo.id}>
-                              {repo.name}
-                            </option>
-                          ))
-                        )}
-                      </select>
+                  <div className="space-y-3 rounded-xl border border-border/60 bg-background/80 p-3">
+                    <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.5fr)_auto] gap-3">
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Repo cible</label>
+                        <select
+                          value={selectedGitTargetId}
+                          onChange={(event) => {
+                            const targetId = event.target.value;
+                            setSelectedGitTargetId(targetId);
+                            const target = availableGitTargets.find((item) => item.value === targetId);
+                            const nextBranch = target?.default_branch || gitSettings.connection.default_branch || 'main';
+                            if (target) {
+                              setSelectedGitBranch(nextBranch);
+                            }
+                            void persistGitSelection(targetId, nextBranch).catch((err: any) => {
+                              setLogs((prev) => [...prev, { text: err.message || 'Impossible de mémoriser le repo cible.', type: 'error' }]);
+                            });
+                          }}
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                        >
+                          {availableGitTargets.length === 0 ? (
+                            <option value="">Aucun repo GitHub disponible</option>
+                          ) : (
+                            availableGitTargets.map((repo) => (
+                              <option key={repo.value} value={repo.value}>
+                                {repo.label}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      </div>
+                      <Button type="button" variant="outline" size="sm" className="self-end gap-2" onClick={handleCreateGitHubRepo} disabled={creatingGitHubRepo}>
+                        {creatingGitHubRepo ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                        Ajouter un repo
+                      </Button>
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Branche</label>
+
+                    <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px] gap-3">
                       <input
-                        value={selectedGitBranch}
-                        onChange={(event) => setSelectedGitBranch(event.target.value)}
-                        placeholder="main"
-                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+                        value={newGitHubRepo.name}
+                        onChange={(event) => setNewGitHubRepo((current) => ({ ...current, name: event.target.value }))}
+                        placeholder="nouveau-repo"
+                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
                       />
+                      <input
+                        value={newGitHubRepo.description}
+                        onChange={(event) => setNewGitHubRepo((current) => ({ ...current, description: event.target.value }))}
+                        placeholder="Description du repo"
+                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                      />
+                      <label className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={newGitHubRepo.private}
+                          onChange={(event) => setNewGitHubRepo((current) => ({ ...current, private: event.target.checked }))}
+                          className="h-4 w-4"
+                        />
+                        Nouveau repo privé
+                      </label>
                     </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.5fr)_auto] gap-3">
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Branche</label>
+                        <select
+                          value={selectedGitBranch}
+                          onChange={(event) => {
+                            const nextBranch = event.target.value;
+                            setSelectedGitBranch(nextBranch);
+                            void persistGitSelection(selectedGitTargetId, nextBranch).catch((err: any) => {
+                              setLogs((prev) => [...prev, { text: err.message || 'Impossible de mémoriser la branche.', type: 'error' }]);
+                            });
+                          }}
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+                        >
+                          {loadingGitBranches ? (
+                            <option value="">Chargement des branches...</option>
+                          ) : githubBranches.length === 0 ? (
+                            <option value={selectedGitBranch || ''}>{selectedGitBranch || 'Aucune branche'}</option>
+                          ) : (
+                            githubBranches.map((branch) => (
+                              <option key={branch.name} value={branch.name}>
+                                {branch.name}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      </div>
+                      <Button type="button" variant="outline" size="sm" className="self-end gap-2" onClick={handleCreateGitBranch} disabled={creatingGitBranch || !selectedRepoFullName}>
+                        {creatingGitBranch ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                        Ajouter une branche
+                      </Button>
+                    </div>
+
+                    <input
+                      value={newGitBranchName}
+                      onChange={(event) => setNewGitBranchName(event.target.value)}
+                      placeholder="feature/nouvelle-branche"
+                      className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+                    />
                   </div>
                 )}
 
@@ -1385,16 +1666,20 @@ export default function ProjectDashboard() {
                       <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadWorkspace}>
                         <FolderTree className="h-3.5 w-3.5" /> Télécharger le repo ZIP
                       </Button>
-                      <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handlePushToGit} disabled={loadingGitPush || !selectedGitTargetId}>
-                        {loadingGitPush ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitBranch className="h-3.5 w-3.5" />}
+                      <Button type="button" variant="outline" size="sm" className="gap-2" onClick={() => openGitActionModal('commit')} disabled={!selectedGitTargetId}>
+                        <FileText className="h-3.5 w-3.5" />
+                        Commit
+                      </Button>
+                      <Button type="button" variant="outline" size="sm" className="gap-2" onClick={() => openGitActionModal('push')} disabled={!selectedGitTargetId}>
+                        <GitBranch className="h-3.5 w-3.5" />
                         Push GitHub
                       </Button>
                     </>
                   )}
                 </div>
-                {isAdminSession && gitSettings.repo_targets.length === 0 && (
+                {isAdminSession && availableGitTargets.length === 0 && (
                   <p className="text-[11px] text-amber-500">
-                    Aucun repo cible n’est configuré. Ajoute d’abord un repo dans l’administration Git.
+                    Aucun repo GitHub disponible. Connecte GitHub dans l’administration.
                   </p>
                 )}
               </CardContent>
@@ -1980,6 +2265,104 @@ export default function ProjectDashboard() {
           </>
         )}
       </AnimatePresence>
+
+      {gitActionModalOpen && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-border bg-background shadow-2xl">
+            <div className="flex items-center justify-between border-b border-border/60 px-6 py-4">
+              <div>
+                <h3 className="text-lg font-bold font-display">
+                  {gitActionType === 'commit' ? 'Confirmer le commit' : 'Confirmer le push GitHub'}
+                </h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Repo: <span className="font-mono">{selectedGitTarget?.label || 'n/a'}</span> · Branche: <span className="font-mono">{selectedGitBranch || 'main'}</span>
+                </p>
+              </div>
+              <Button variant="ghost" size="icon" onClick={() => !runningGitAction && setGitActionModalOpen(false)} disabled={runningGitAction}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="space-y-4 px-6 py-5">
+              {!gitActionResult && !runningGitAction && (
+                <div className="space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    {gitActionType === 'commit'
+                      ? 'Cette action va créer un commit sur la branche sélectionnée sans pousser vers GitHub.'
+                      : 'Cette action va créer un commit puis pousser les changements vers GitHub.'}
+                  </p>
+                  <div className="rounded-xl border border-border/60 bg-muted/20 p-4 text-sm text-muted-foreground">
+                    Le message de commit sera généré automatiquement par l’IA à partir des fichiers modifiés.
+                  </div>
+                </div>
+              )}
+
+              {runningGitAction && (
+                <div className="rounded-xl border border-primary/20 bg-primary/5 p-6 text-center">
+                  <Loader2 className="mx-auto h-6 w-6 animate-spin text-primary" />
+                  <p className="mt-3 text-sm font-semibold">
+                    {gitActionType === 'commit' ? 'Commit en cours...' : 'Commit et push en cours...'}
+                  </p>
+                </div>
+              )}
+
+              {gitActionResult && (
+                <div className="space-y-4">
+                  <div className={cn(
+                    'rounded-xl border p-4 text-sm',
+                    gitActionResult.pushed || gitActionResult.committed
+                      ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+                      : 'border-amber-500/20 bg-amber-500/10 text-amber-300'
+                  )}>
+                    {gitActionResult.message || 'Action Git terminée.'}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div className="rounded-xl border border-border/60 bg-muted/20 p-4 text-sm">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Statut</p>
+                      <p className="mt-2">Commit: <strong>{gitActionResult.committed ? 'oui' : 'non'}</strong></p>
+                      <p>Push: <strong>{gitActionResult.pushed ? 'oui' : 'non'}</strong></p>
+                      <p>Branche: <strong className="font-mono">{gitActionResult.branch || 'n/a'}</strong></p>
+                    </div>
+                    <div className="rounded-xl border border-border/60 bg-muted/20 p-4 text-sm">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Commit</p>
+                      <p className="mt-2 font-mono">{gitActionResult.commit_sha || 'n/a'}</p>
+                      <p className="mt-2">{gitActionResult.commit_message || 'Aucun message'}</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border/60 bg-muted/20 p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Fichiers commités</p>
+                    {gitActionResult.changed_files.length === 0 ? (
+                      <p className="mt-3 text-sm text-muted-foreground">Aucun fichier modifié détecté.</p>
+                    ) : (
+                      <div className="mt-3 max-h-52 overflow-auto space-y-2">
+                        {gitActionResult.changed_files.map((file) => (
+                          <div key={file} className="rounded-lg border border-border/50 bg-background/70 px-3 py-2 text-sm font-mono">
+                            {file}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-border/60 px-6 py-4">
+              <Button variant="outline" onClick={() => setGitActionModalOpen(false)} disabled={runningGitAction}>
+                {gitActionResult ? 'Fermer' : 'Annuler'}
+              </Button>
+              {!gitActionResult && (
+                <Button onClick={handleConfirmGitAction} disabled={runningGitAction || !selectedGitTargetId} className="gap-2">
+                  {runningGitAction ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitBranch className="h-4 w-4" />}
+                  {gitActionType === 'commit' ? 'Confirmer le commit' : 'Confirmer le push'}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
     </AuthGuard>
   );

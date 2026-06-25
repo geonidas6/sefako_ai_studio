@@ -1,5 +1,32 @@
 const API_BASE = '/api';
 
+function stripHtmlError(html: string) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function readErrorMessage(response: Response, fallback = 'Une erreur est survenue') {
+  const contentType = response.headers.get('content-type') || '';
+  try {
+    if (contentType.includes('application/json')) {
+      const data = await response.json();
+      return data.detail || data.message || fallback;
+    }
+    const text = await response.text();
+    const cleaned = stripHtmlError(text);
+    if (response.status === 404) {
+      return cleaned || 'Route backend introuvable. Le serveur doit peut-être être redémarré.';
+    }
+    return cleaned || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function getStoredToken() {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem('token');
@@ -32,11 +59,7 @@ function getHeaders() {
 export async function downloadFile(path: string, filename?: string) {
   const response = await fetch(`${API_BASE}${path}`, { headers: { ...getHeaders() } });
   if (!response.ok) {
-    let errorMsg = 'Une erreur est survenue';
-    try {
-      const data = await response.json();
-      errorMsg = data.detail || errorMsg;
-    } catch {}
+    const errorMsg = await readErrorMessage(response);
     throw new Error(errorMsg);
   }
   const blob = await response.blob();
@@ -61,13 +84,7 @@ export async function request(path: string, options: RequestInit = {}) {
   });
 
   if (!response.ok) {
-    let errorMsg = 'Une erreur est survenue';
-    try {
-      const data = await response.json();
-      errorMsg = data.detail || errorMsg;
-    } catch {
-      // ignore
-    }
+    const errorMsg = await readErrorMessage(response);
 
     if (response.status === 401 && typeof window !== 'undefined') {
       localStorage.removeItem('token');
@@ -255,6 +272,12 @@ export const api = {
         body: JSON.stringify({ branch }),
       });
     },
+    async commitToGit(id: string, branch?: string | null) {
+      return request(`/projects/${id}/git/commit`, {
+        method: 'POST',
+        body: JSON.stringify({ branch }),
+      });
+    },
     async delete(id: string) {
       return request(`/projects/${id}`, {
         method: 'DELETE',
@@ -302,6 +325,12 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
+    async updateCommitMessageSettings(data: { provider: string; model: string }) {
+      return request('/admin/git-settings/commit-message', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
     async getGitHubOAuthConfig() {
       return request('/admin/github/oauth-config');
     },
@@ -323,8 +352,17 @@ export const api = {
     async getGitHubRepos() {
       return request('/admin/github/repos');
     },
+    async getGitHubBranches(repoFullName: string) {
+      return request(`/admin/github/branches?repo_full_name=${encodeURIComponent(repoFullName)}`);
+    },
     async createGitHubRepo(data: { name: string; description?: string | null; private: boolean; default_branch?: string }) {
       return request('/admin/github/repos', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
+    async createGitHubBranch(data: { repo_full_name: string; branch_name: string; from_branch: string }) {
+      return request('/admin/github/branches', {
         method: 'POST',
         body: JSON.stringify(data),
       });
