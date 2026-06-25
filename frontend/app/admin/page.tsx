@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { Suspense, useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
@@ -151,7 +151,7 @@ const providerSetupNotes: Record<string, string> = {
   bedrock: 'Utilise les identifiants AWS du backend et la variable BEDROCK_REGION.',
 };
 
-export default function AdminDashboard() {
+function AdminDashboard() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [activeSection, setActiveSection] = useState<AdminSection>('projects');
@@ -1825,5 +1825,13 @@ export default function AdminDashboard() {
         {activeSection === 'security' && renderSecurityPanel()}
       </main>
     </div>
+  );
+}
+
+export default function AdminPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center"><BarChart3 className="h-8 w-8 animate-spin text-primary" /></div>}>
+      <AdminDashboard />
+    </Suspense>
   );
 }
