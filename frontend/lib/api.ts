@@ -243,8 +243,17 @@ export const api = {
     async downloadMarkdownExport(id: string) {
       return downloadFile(`/projects/${id}/exports/markdown`, `aia-project-${id}.md`);
     },
-    async getWorkspaceHostExportCommand(id: string) {
-      return request(`/projects/${id}/workspace/host-export-command`);
+    async updateGitTarget(id: string, targetId: string, branch?: string | null) {
+      return request(`/projects/${id}/git/target`, {
+        method: 'PUT',
+        body: JSON.stringify({ target_id: targetId, branch }),
+      });
+    },
+    async pushToGit(id: string, branch?: string | null) {
+      return request(`/projects/${id}/git/push`, {
+        method: 'POST',
+        body: JSON.stringify({ branch }),
+      });
     },
     async delete(id: string) {
       return request(`/projects/${id}`, {
@@ -281,6 +290,48 @@ export const api = {
     async updateGenerationSettings(data: { root_path: string; require_technical_approval: boolean }) {
       return request('/admin/generation-settings', {
         method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
+    async getGitSettings() {
+      return request('/admin/git-settings');
+    },
+    async updateGitSettings(data: { default_branch: string; is_enabled: boolean }) {
+      return request('/admin/git-settings', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
+    async getGitHubOAuthConfig() {
+      return request('/admin/github/oauth-config');
+    },
+    async updateGitHubOAuthConfig(data: { client_id: string; client_secret?: string | null }) {
+      return request('/admin/github/oauth-config', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      });
+    },
+    async startGitHubOAuth() {
+      return request('/admin/github/oauth/start', { method: 'POST' });
+    },
+    async getGitHubStatus() {
+      return request('/admin/github/status');
+    },
+    async disconnectGitHub() {
+      return request('/admin/github/disconnect', { method: 'POST' });
+    },
+    async getGitHubRepos() {
+      return request('/admin/github/repos');
+    },
+    async createGitHubRepo(data: { name: string; description?: string | null; private: boolean; default_branch?: string }) {
+      return request('/admin/github/repos', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
+    async createGitRepoTarget(data: { name: string; repo_url?: string | null; repo_full_name?: string | null; default_branch: string }) {
+      return request('/admin/git-settings/repos', {
+        method: 'POST',
         body: JSON.stringify(data),
       });
     },

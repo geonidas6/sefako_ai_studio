@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { 
@@ -21,6 +21,9 @@ import {
   BarChart3,
   Loader2,
   ExternalLink,
+  GitBranch,
+  Link2,
+  RefreshCw,
   Plus,
   Users,
   Trash2,
@@ -35,7 +38,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
-type AdminSection = 'projects' | 'departments' | 'settings' | 'security';
+type AdminSection = 'projects' | 'departments' | 'settings' | 'git' | 'security';
 
 interface Project {
   id: string;
@@ -100,6 +103,42 @@ interface GenerationSettings {
   require_technical_approval: boolean;
 }
 
+interface GitConnection {
+  provider: string;
+  username: string | null;
+  email: string | null;
+  connected: boolean;
+  has_token: boolean;
+  default_branch: string;
+  is_enabled: boolean;
+}
+
+interface GitRepoTarget {
+  id: string;
+  name: string;
+  repo_url: string;
+  default_branch: string;
+  is_active: boolean;
+}
+
+interface GitSettings {
+  connection: GitConnection;
+  repo_targets: GitRepoTarget[];
+  github_oauth_client_id?: string | null;
+  has_github_oauth_client_secret?: boolean;
+  github_oauth_source?: string;
+}
+
+interface GitHubRepo {
+  name: string;
+  full_name: string;
+  clone_url: string;
+  html_url: string;
+  description: string | null;
+  private: boolean;
+  default_branch: string;
+}
+
 interface QwenAuthStatus {
   authenticated: boolean;
   method: string;
@@ -129,6 +168,7 @@ const providerSetupNotes: Record<string, string> = {
 
 export default function AdminDashboard() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [activeSection, setActiveSection] = useState<AdminSection>('projects');
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectQuery, setProjectQuery] = useState('');
@@ -141,6 +181,34 @@ export default function AdminDashboard() {
   const [savingWorkflowSettings, setSavingWorkflowSettings] = useState(false);
   const [generationSettings, setGenerationSettings] = useState<GenerationSettings>({ root_path: '/opt', require_technical_approval: true });
   const [savingGenerationSettings, setSavingGenerationSettings] = useState(false);
+  const [gitSettings, setGitSettings] = useState<GitSettings>({
+    connection: {
+      provider: 'github',
+      username: '',
+      email: '',
+      connected: false,
+      has_token: false,
+      default_branch: 'main',
+      is_enabled: false,
+    },
+    repo_targets: [],
+    github_oauth_client_id: '',
+    has_github_oauth_client_secret: false,
+    github_oauth_source: 'environment',
+  });
+  const [githubOAuthForm, setGithubOAuthForm] = useState({
+    client_id: '',
+    client_secret: '',
+    has_client_secret: false,
+    source: 'environment',
+  });
+  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
+  const [loadingGitHubRepos, setLoadingGitHubRepos] = useState(false);
+  const [startingGitHubAuth, setStartingGitHubAuth] = useState(false);
+  const [disconnectingGitHub, setDisconnectingGitHub] = useState(false);
+  const [savingNewGitRepo, setSavingNewGitRepo] = useState(false);
+  const [creatingGitHubRepo, setCreatingGitHubRepo] = useState(false);
+  const [newGitHubRepo, setNewGitHubRepo] = useState({ name: '', description: '', private: true });
   const [qwenAuth, setQwenAuth] = useState<QwenAuthStatus>({ authenticated: false, method: 'none' });
   const [startingQwenAuth, setStartingQwenAuth] = useState(false);
   const [savingQwenCliKey, setSavingQwenCliKey] = useState(false);
@@ -176,12 +244,14 @@ export default function AdminDashboard() {
         api.admin.getCosts(),
         api.admin.getWorkflowSettings(),
         api.admin.getGenerationSettings(),
+        api.admin.getGitSettings(),
         api.admin.getQwenAuthStatus(),
       ]);
 
-      const [projectsData, configsData, assignmentsData, departmentsData, costsData, workflowSettingsData, generationSettingsData, qwenAuthData] = results;
+      const [projectsData, configsData, assignmentsData, departmentsData, costsData, workflowSettingsData, generationSettingsData, gitSettingsData, qwenAuthData] = results;
 
       const failures = results.filter((item): item is PromiseRejectedResult => item.status === 'rejected');
+      const githubRedirectStatus = searchParams.get('github');
       const authFailure = failures.find((item) => String(item.reason?.message || '').toLowerCase().includes('identifiants invalides'));
 
       if (authFailure) {
@@ -198,9 +268,31 @@ export default function AdminDashboard() {
       if (costsData.status === 'fulfilled') setCosts(costsData.value);
       if (workflowSettingsData.status === 'fulfilled') setWorkflowSettings(workflowSettingsData.value);
       if (generationSettingsData.status === 'fulfilled') setGenerationSettings(generationSettingsData.value);
+      if (gitSettingsData.status === 'fulfilled') {
+        setGitSettings(gitSettingsData.value);
+        setGithubOAuthForm({
+          client_id: gitSettingsData.value.github_oauth_client_id || '',
+          client_secret: '',
+          has_client_secret: Boolean(gitSettingsData.value.has_github_oauth_client_secret),
+          source: gitSettingsData.value.github_oauth_source || 'environment',
+        });
+      }
       if (qwenAuthData.status === 'fulfilled') setQwenAuth(qwenAuthData.value);
 
-      if (failures.length > 0) {
+      if (gitSettingsData.status === 'fulfilled' && gitSettingsData.value?.connection?.connected) {
+        try {
+          const repos = await api.admin.getGitHubRepos();
+          setGithubRepos(repos);
+        } catch {
+          // GitHub repo list is optional until connected
+        }
+      }
+
+      if (githubRedirectStatus === 'connected') {
+        setSuccessMsg('GitHub connecté avec succès.');
+        setTimeout(() => setSuccessMsg(''), 5000);
+        window.history.replaceState({}, '', '/admin');
+      } else if (failures.length > 0) {
         const firstMessage = String(failures[0].reason?.message || "Certaines données admin n'ont pas pu être chargées.");
         setError(`Chargement partiel : ${firstMessage}`);
       }
@@ -495,6 +587,206 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleStartGitHubAuth = async () => {
+    setError('');
+    setSuccessMsg('');
+    setStartingGitHubAuth(true);
+    try {
+      const response = await api.admin.startGitHubOAuth();
+      if (response.url) {
+        window.location.href = response.url;
+        setSuccessMsg('Redirection vers GitHub en cours. Termine l’autorisation puis reviens sur cette page.');
+        setTimeout(() => setSuccessMsg(''), 6000);
+      }
+    } catch (err: any) {
+      const message = String(err?.message || '');
+      if (message.includes('client_id GitHub OAuth') || message.includes('configuration GitHub OAuth est incomplète')) {
+        setError("GitHub OAuth n’est pas encore configuré sur le serveur. Ajoute `GITHUB_OAUTH_CLIENT_ID` et `GITHUB_OAUTH_CLIENT_SECRET` dans l’environnement du backend, puis redémarre l’application. Callback attendu : `https://api-sefako-ai-studio.it-sefako.com/api/admin/github/oauth/callback`.");
+      } else {
+        setError(err.message || 'Impossible de démarrer l’autorisation GitHub.');
+      }
+    } finally {
+      setStartingGitHubAuth(false);
+    }
+  };
+
+  const handleSaveGitHubOAuthConfig = async () => {
+    setError('');
+    setSuccessMsg('');
+    const clientId = githubOAuthForm.client_id.trim();
+    const clientSecret = githubOAuthForm.client_secret.trim();
+    if (!clientId) {
+      setError('Le client_id GitHub OAuth est requis.');
+      return;
+    }
+    if (!githubOAuthForm.has_client_secret && !clientSecret) {
+      setError('Le client secret GitHub OAuth est requis au moins une fois.');
+      return;
+    }
+
+    try {
+      const response = await api.admin.updateGitHubOAuthConfig({
+        client_id: clientId,
+        client_secret: clientSecret || null,
+      });
+      await refreshGitHubState();
+      setGitSettings((current) => ({
+        ...current,
+        github_oauth_client_id: clientId,
+        has_github_oauth_client_secret: response.has_client_secret || Boolean(clientSecret),
+        github_oauth_source: response.source || 'database',
+      }));
+      setGithubOAuthForm((current) => ({
+        ...current,
+        client_secret: '',
+        has_client_secret: response.has_client_secret || Boolean(clientSecret),
+        source: response.source || 'database',
+      }));
+      setSuccessMsg('Configuration GitHub OAuth enregistrée.');
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setError(err.message || 'Impossible de sauvegarder la configuration GitHub OAuth.');
+    }
+  };
+
+  const refreshGitHubState = async () => {
+    try {
+      const [status, repos, settings] = await Promise.allSettled([
+        api.admin.getGitHubStatus(),
+        api.admin.getGitHubRepos(),
+        api.admin.getGitSettings(),
+      ]);
+      if (status.status === 'fulfilled') setGitSettings((current) => ({
+        ...current,
+        connection: { ...current.connection, ...status.value },
+      }));
+      if (repos.status === 'fulfilled') setGithubRepos(repos.value);
+      if (settings.status === 'fulfilled') {
+        setGitSettings(settings.value);
+        setGithubOAuthForm({
+          client_id: settings.value.github_oauth_client_id || '',
+          client_secret: '',
+          has_client_secret: Boolean(settings.value.has_github_oauth_client_secret),
+          source: settings.value.github_oauth_source || 'environment',
+        });
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDisconnectGitHub = async () => {
+    setError('');
+    setSuccessMsg('');
+    setDisconnectingGitHub(true);
+    try {
+      const response = await api.admin.disconnectGitHub();
+      setGitSettings((current) => ({
+        ...current,
+        connection: {
+          ...current.connection,
+          ...response,
+          connected: false,
+          has_token: false,
+          is_enabled: false,
+        },
+      }));
+      setGithubRepos([]);
+      setSuccessMsg('Compte GitHub déconnecté.');
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setError(err.message || 'Impossible de déconnecter GitHub.');
+    } finally {
+      setDisconnectingGitHub(false);
+    }
+  };
+
+  const handleRefreshGitHubRepos = async () => {
+    setError('');
+    setSuccessMsg('');
+    setLoadingGitHubRepos(true);
+    try {
+      const repos = await api.admin.getGitHubRepos();
+      setGithubRepos(repos);
+    } catch (err: any) {
+      setError(err.message || 'Impossible de charger les repos GitHub.');
+    } finally {
+      setLoadingGitHubRepos(false);
+    }
+  };
+
+  const handleSaveGitSettings = async () => {
+    setError('');
+    setSuccessMsg('');
+    try {
+      const response = await api.admin.updateGitSettings({
+        default_branch: gitSettings.connection.default_branch,
+        is_enabled: gitSettings.connection.is_enabled,
+      });
+      setGitSettings((current) => ({
+        ...current,
+        connection: {
+          ...current.connection,
+          ...response,
+        },
+      }));
+      setSuccessMsg('Préférences GitHub enregistrées.');
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors de la sauvegarde GitHub.');
+    }
+  };
+
+  const handleImportGitHubRepo = async (repo: GitHubRepo) => {
+    setError('');
+    setSuccessMsg('');
+    setSavingNewGitRepo(true);
+    try {
+      const response = await api.admin.createGitRepoTarget({
+        name: repo.name,
+        repo_full_name: repo.full_name,
+        default_branch: repo.default_branch || 'main',
+      });
+      setGitSettings((current) => ({
+        ...current,
+        repo_targets: [response, ...current.repo_targets],
+      }));
+      setSuccessMsg(`Repo importé: ${repo.full_name}`);
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setError(err.message || 'Impossible d’importer le repo GitHub.');
+    } finally {
+      setSavingNewGitRepo(false);
+    }
+  };
+
+  const handleCreateGitHubRepo = async () => {
+    setError('');
+    setSuccessMsg('');
+    if (!newGitHubRepo.name.trim()) {
+      setError('Le nom du nouveau repo est requis.');
+      return;
+    }
+
+    setCreatingGitHubRepo(true);
+    try {
+      await api.admin.createGitHubRepo({
+        name: newGitHubRepo.name.trim(),
+        description: newGitHubRepo.description.trim() || undefined,
+        private: newGitHubRepo.private,
+        default_branch: gitSettings.connection.default_branch || 'main',
+      });
+      await refreshGitHubState();
+      setNewGitHubRepo({ name: '', description: '', private: true });
+      setSuccessMsg('Repo GitHub créé et ajouté au studio.');
+      setTimeout(() => setSuccessMsg(''), 5000);
+    } catch (err: any) {
+      setError(err.message || 'Impossible de créer le repo GitHub.');
+    } finally {
+      setCreatingGitHubRepo(false);
+    }
+  };
+
   const handleChangePassword = async () => {
     setError('');
     setSuccessMsg('');
@@ -542,6 +834,12 @@ export default function AdminDashboard() {
       label: 'Paramètre',
       description: 'Providers, modèles et quotas',
       icon: Settings,
+    },
+    {
+      key: 'git' as const,
+      label: 'Git',
+      description: 'Connexion et dépôts cibles',
+      icon: GitBranch,
     },
     {
       key: 'security' as const,
@@ -1171,6 +1469,283 @@ export default function AdminDashboard() {
     </div>
   );
 
+  const renderGitPanel = () => (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold font-display tracking-tight flex items-center gap-2">
+          <GitBranch className="h-5 w-5 text-primary" /> GitHub Integration
+        </h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Connecte ton compte GitHub une seule fois, puis importe ou crée les repos que les projets pourront pousser.
+        </p>
+      </div>
+
+      <Card className="border-border/60">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Key className="h-5 w-5 text-primary" />
+            Configuration OAuth GitHub
+          </CardTitle>
+          <CardDescription>
+            Renseigne ici le client_id et le client_secret de l’application OAuth GitHub. La valeur du secret reste masquée après enregistrement.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Client ID</label>
+              <Input
+                value={githubOAuthForm.client_id}
+                onChange={(event) => setGithubOAuthForm((current) => ({ ...current, client_id: event.target.value }))}
+                placeholder="Ov23..."
+                className="h-11 font-mono"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Client secret</label>
+              <Input
+                value={githubOAuthForm.client_secret}
+                onChange={(event) => setGithubOAuthForm((current) => ({ ...current, client_secret: event.target.value }))}
+                placeholder={githubOAuthForm.has_client_secret ? 'Secret déjà enregistré - laisse vide pour conserver' : 'Complète le secret OAuth'}
+                type="password"
+                className="h-11 font-mono"
+              />
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 rounded-xl border border-border/60 bg-background/50 p-4 text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">
+            <span>
+              Source actuelle : <strong className="text-foreground">{githubOAuthForm.source}</strong>
+            </span>
+            <span>
+              Secret enregistré : <strong className="text-foreground">{githubOAuthForm.has_client_secret ? 'oui' : 'non'}</strong>
+            </span>
+          </div>
+          <div className="flex justify-end">
+            <Button onClick={handleSaveGitHubOAuthConfig} className="h-10">
+              <Save className="mr-2 h-4 w-4" />
+              Enregistrer OAuth
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-primary/20 bg-primary/5">
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <GitBranch className="h-5 w-5 text-primary" />
+            Authorization GitHub
+          </CardTitle>
+          <CardDescription>
+            L’admin se connecte via OAuth GitHub. Aucun token à copier-coller.
+          </CardDescription>
+        </CardHeader>
+          <CardContent className="space-y-4">
+          <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200">
+            <p className="font-semibold text-amber-100">Configuration requise</p>
+            <p className="mt-1 text-xs leading-relaxed text-amber-100/80">
+              Le bouton GitHub OAuth fonctionne seulement si le backend a <code>GITHUB_OAUTH_CLIENT_ID</code> et <code>GITHUB_OAUTH_CLIENT_SECRET</code> configurés. Sans ça, la connexion est bloquée côté serveur.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-border/60 bg-background/60 p-4 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold">
+                {gitSettings.connection.connected
+                  ? `Connecté${gitSettings.connection.username ? ` · ${gitSettings.connection.username}` : ''}`
+                  : 'GitHub non connecté'}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {gitSettings.connection.email || 'Aucun email détecté'} · branche par défaut {gitSettings.connection.default_branch || 'main'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={handleStartGitHubAuth} disabled={startingGitHubAuth} className="h-10">
+                {startingGitHubAuth ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <GitBranch className="mr-2 h-4 w-4" />}
+                Connect GitHub
+              </Button>
+              <Button variant="outline" onClick={handleDisconnectGitHub} disabled={disconnectingGitHub || !gitSettings.connection.connected} className="h-10">
+                {disconnectingGitHub ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                Déconnecter
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px] gap-4">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Branche par défaut</label>
+              <Input
+                value={gitSettings.connection.default_branch}
+                onChange={(event) => setGitSettings((current) => ({
+                  ...current,
+                  connection: { ...current.connection, default_branch: event.target.value },
+                }))}
+                placeholder="main"
+                className="h-11 font-mono"
+              />
+            </div>
+            <label className="flex items-start gap-3 rounded-xl border border-border/60 bg-background/50 p-4 text-sm">
+              <input
+                type="checkbox"
+                checked={gitSettings.connection.is_enabled}
+                onChange={(event) => setGitSettings((current) => ({
+                  ...current,
+                  connection: { ...current.connection, is_enabled: event.target.checked },
+                }))}
+                className="mt-1 h-4 w-4 rounded border-border bg-background"
+              />
+              <span className="text-muted-foreground">
+                Autoriser les pushes depuis l’app.
+              </span>
+            </label>
+          </div>
+
+          <div className="flex justify-end">
+            <Button onClick={handleSaveGitSettings} disabled={startingGitHubAuth} className="h-10">
+              <Save className="mr-2 h-4 w-4" />
+              Enregistrer les préférences
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <Card className="border-border/60">
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Link2 className="h-5 w-5 text-primary" />
+              Créer un repo GitHub
+            </CardTitle>
+            <CardDescription>
+              Crée un dépôt distant via l’API GitHub, puis ajoute-le automatiquement comme cible du studio.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Nom du repo</label>
+              <Input
+                value={newGitHubRepo.name}
+                onChange={(event) => setNewGitHubRepo({ ...newGitHubRepo, name: event.target.value })}
+                placeholder="site-vitrine-client"
+                className="h-11"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Description</label>
+              <Input
+                value={newGitHubRepo.description}
+                onChange={(event) => setNewGitHubRepo({ ...newGitHubRepo, description: event.target.value })}
+                placeholder="Repo généré depuis AIA Studio"
+                className="h-11"
+              />
+            </div>
+            <label className="flex items-start gap-3 rounded-xl border border-border/60 bg-background/50 p-4 text-sm">
+              <input
+                type="checkbox"
+                checked={newGitHubRepo.private}
+                onChange={(event) => setNewGitHubRepo({ ...newGitHubRepo, private: event.target.checked })}
+                className="mt-1 h-4 w-4 rounded border-border bg-background"
+              />
+              <span className="text-muted-foreground">Créer le repo en privé.</span>
+            </label>
+            <div className="flex justify-end">
+              <Button onClick={handleCreateGitHubRepo} disabled={creatingGitHubRepo} className="h-10">
+                {creatingGitHubRepo ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                Créer et importer
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border/60">
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <GitBranch className="h-4 w-4 text-primary" /> Repos GitHub
+            </CardTitle>
+            <CardDescription>Repos accessibles sur le compte connecté. Clique pour les importer dans le studio.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex justify-end">
+              <Button variant="outline" size="sm" onClick={handleRefreshGitHubRepos} disabled={loadingGitHubRepos} className="h-9">
+                {loadingGitHubRepos ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-2 h-3 w-3" />}
+                Rafraîchir
+              </Button>
+            </div>
+            {githubRepos.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-border/60 bg-muted/20 p-6 text-center">
+                <p className="font-semibold">Aucun repo GitHub visible</p>
+                <p className="mt-1 text-sm text-muted-foreground">Connecte GitHub puis rafraîchis la liste pour voir les dépôts du compte.</p>
+              </div>
+            ) : githubRepos.map((repo) => (
+              <div key={repo.full_name} className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-semibold truncate">{repo.full_name}</p>
+                      <span className={cn(
+                        'shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest',
+                        repo.private ? 'border-primary/20 bg-primary/10 text-primary' : 'border-border/60 bg-background text-muted-foreground'
+                      )}>
+                        {repo.private ? 'Private' : 'Public'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground break-words">{repo.description || 'Sans description'}</p>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{repo.default_branch}</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button asChild variant="outline" size="sm" className="h-8">
+                    <a href={repo.html_url} target="_blank" rel="noreferrer">Ouvrir</a>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleImportGitHubRepo(repo)}
+                    disabled={savingNewGitRepo}
+                    className="h-8"
+                  >
+                    {savingNewGitRepo ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : <Plus className="mr-2 h-3 w-3" />}
+                    Ajouter au studio
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="border-border/60">
+        <CardHeader>
+          <CardTitle className="text-lg">Repos importés dans le studio</CardTitle>
+          <CardDescription>Ce sont les cibles sélectionnables depuis les projets pour les pushes GitHub.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {gitSettings.repo_targets.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border/60 bg-muted/20 p-6 text-center">
+              <p className="font-semibold">Aucun repo importé</p>
+              <p className="mt-1 text-sm text-muted-foreground">Importe un repo GitHub pour qu’il soit disponible dans les projets.</p>
+            </div>
+          ) : gitSettings.repo_targets.map((repo) => (
+            <div key={repo.id} className="rounded-xl border border-border/60 bg-muted/20 p-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="min-w-0">
+                <p className="font-semibold truncate">{repo.name}</p>
+                <p className="text-xs text-muted-foreground font-mono break-all">{repo.repo_url}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{repo.default_branch}</span>
+                <span className={cn(
+                  'rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest',
+                  repo.is_active ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-500' : 'border-border/60 bg-muted text-muted-foreground'
+                )}>
+                  {repo.is_active ? 'Actif' : 'Inactif'}
+                </span>
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  );
+
   const renderSecurityPanel = () => (
     <div className="space-y-6 max-w-3xl">
       <div>
@@ -1337,6 +1912,7 @@ export default function AdminDashboard() {
         {activeSection === 'projects' && renderProjectsPanel()}
         {activeSection === 'departments' && renderDepartmentsPanel()}
         {activeSection === 'settings' && renderSettingsPanel()}
+        {activeSection === 'git' && renderGitPanel()}
         {activeSection === 'security' && renderSecurityPanel()}
       </main>
     </div>

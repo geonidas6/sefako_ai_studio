@@ -487,6 +487,50 @@ class LLMRouter:
             provider_name = PROVIDERS.get(provider, {}).get("name", provider)
             raise RuntimeError(f"Erreur API {provider_name} ({model}) : {e}") from e
 
+    async def generate_with_provider(
+        self,
+        provider: str,
+        model: str,
+        prompt: str,
+        system_prompt: str = "",
+    ) -> str:
+        """Generate a response using an explicit provider/model pair."""
+        if provider not in PROVIDERS:
+            raise RuntimeError(f"Provider inconnu ou non supporté: {provider}")
+        if provider == "mock":
+            raise RuntimeError("Le provider Mock ne peut pas être utilisé pour générer un message de commit.")
+
+        _, default_model, api_key = await self.get_provider_details(provider)
+        selected_model = (model or default_model).strip() or default_model
+
+        if provider == "bedrock":
+            api_key = api_key or "__aws_bedrock__"
+        if not api_key:
+            if provider == "qwen" and qwen_cli_is_authenticated():
+                api_key = "__qwen_cli_auth__"
+            else:
+                provider_name = PROVIDERS.get(provider, {}).get("name", provider)
+                raise RuntimeError(
+                    f"Aucune clé API configurée pour {provider_name}. "
+                    "Ajoutez une clé valide dans l'administration avant de lancer l'analyse."
+                )
+
+        rpm = await self._get_requests_per_minute(provider)
+        timeout_seconds = await self._get_llm_timeout_seconds()
+
+        try:
+            return await asyncio.wait_for(
+                self._run_with_rate_limit(
+                    provider,
+                    rpm,
+                    lambda: self._call_provider(provider, selected_model, api_key, prompt, system_prompt),
+                ),
+                timeout=timeout_seconds,
+            )
+        except Exception as e:
+            provider_name = PROVIDERS.get(provider, {}).get("name", provider)
+            raise RuntimeError(f"Erreur API {provider_name} ({selected_model}) : {e}") from e
+
     async def generate_with_fallback(
         self,
         prompt: str,

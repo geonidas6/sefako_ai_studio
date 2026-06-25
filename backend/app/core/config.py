@@ -20,8 +20,16 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str = "Admin@AIA2026!"
 
+    # Public domains
+    frontend_domain: str = "sefako-ai-studio.it-sefako.com"
+    api_domain: str = "api-sefako-ai-studio.it-sefako.com"
+
     # Encryption key for API keys stored in DB (Fernet key)
     encryption_key: str = ""
+
+    # GitHub OAuth
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
 
     # LLM API keys (fallback from env if not set in DB)
     gemini_api_key: str = ""

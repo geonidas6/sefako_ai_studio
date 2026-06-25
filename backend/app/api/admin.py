@@ -7,6 +7,7 @@ from typing import Optional
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -17,6 +18,7 @@ from app.models.llm_config import LLMConfig
 from app.models.department import Department, Employee
 from app.core.security import get_current_admin
 from app.core.agency import get_agency_departments, seed_default_agency
+from app.core.config import settings
 from app.core.llm_router import (
     LLMRouter,
     PROVIDERS,
@@ -26,6 +28,30 @@ from app.core.llm_router import (
     get_default_requests_per_minute,
     get_qwen_auth_method,
     qwen_cli_is_authenticated,
+)
+from app.core.git_publish import (
+    add_git_repo_target,
+    build_github_oauth_url,
+    consume_github_oauth_state,
+    create_github_oauth_state,
+    create_github_repository,
+    exchange_github_oauth_code,
+    disconnect_github,
+    fetch_github_repositories,
+    fetch_github_user_profile,
+    get_commit_message_generation_state,
+    GitHubConnectionState,
+    GitHubOAuthCredentialsState,
+    get_git_connection_state,
+    get_github_connection_state,
+    get_github_oauth_credentials,
+    get_github_oauth_secret,
+    list_git_repo_targets,
+    _frontend_admin_url,
+    save_commit_message_generation_state,
+    save_git_connection_state,
+    save_github_oauth_credentials,
+    save_github_profile,
 )
 from app.core.project_workspace import (
     DEFAULT_WORKSPACE_ROOT,
@@ -127,6 +153,85 @@ class GenerationSettingsIn(BaseModel):
 class GenerationSettingsOut(BaseModel):
     root_path: str
     require_technical_approval: bool
+
+
+class GitConnectionOut(BaseModel):
+    provider: str
+    username: Optional[str]
+    email: Optional[str]
+    connected: bool
+    has_token: bool
+    default_branch: str
+    is_enabled: bool
+
+
+class GitRepoTargetIn(BaseModel):
+    name: str
+    repo_url: Optional[str] = None
+    repo_full_name: Optional[str] = None
+    default_branch: str = "main"
+
+
+class GitRepoTargetOut(BaseModel):
+    id: str
+    name: str
+    repo_url: str
+    default_branch: str
+    is_active: bool
+
+
+class GitSettingsOut(BaseModel):
+    connection: GitConnectionOut
+    repo_targets: list[GitRepoTargetOut]
+    github_oauth_client_id: Optional[str] = None
+    has_github_oauth_client_secret: bool = False
+    github_oauth_source: str = "environment"
+    commit_message_provider: str = "gemini"
+    commit_message_model: str = ""
+    commit_message_source: str = "default"
+
+
+class GitHubRepoOut(BaseModel):
+    name: str
+    full_name: str
+    clone_url: str
+    html_url: str
+    description: Optional[str]
+    private: bool
+    default_branch: str
+
+
+class GitHubRepoCreateIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    private: bool = True
+    default_branch: str = "main"
+
+
+class GitHubOAuthStartOut(BaseModel):
+    url: str
+
+
+class GitHubOAuthConfigIn(BaseModel):
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+
+
+class GitHubOAuthConfigOut(BaseModel):
+    client_id: Optional[str] = None
+    has_client_secret: bool = False
+    source: str = "environment"
+
+
+class CommitMessageSettingsIn(BaseModel):
+    provider: str
+    model: str
+
+
+class CommitMessageSettingsOut(BaseModel):
+    provider: str
+    model: str
+    source: str = "default"
 
 
 WORKFLOW_DEBATE_ROUNDS_KEY = "workflow_debate_rounds"
@@ -258,6 +363,328 @@ async def update_generation_settings(
     return GenerationSettingsOut(
         root_path=settings.root_path,
         require_technical_approval=settings.require_technical_approval,
+    )
+
+
+@router.get("/git-settings", response_model=GitSettingsOut)
+async def get_git_settings(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    try:
+        connection = await get_github_connection_state(db)
+    except Exception:
+        connection = None
+    try:
+        targets = await list_git_repo_targets(db)
+    except Exception:
+        targets = []
+    try:
+        oauth = await get_github_oauth_credentials(db)
+    except Exception:
+        oauth = None
+    try:
+        commit_message_settings = await get_commit_message_generation_state(db)
+    except Exception:
+        commit_message_settings = None
+
+    connection = connection or GitHubConnectionState(
+        connected=False,
+        login=None,
+        name=None,
+        email=None,
+        avatar_url=None,
+        default_branch="main",
+    )
+    oauth = oauth or GitHubOAuthCredentialsState(
+        client_id=settings.github_oauth_client_id.strip() or None,
+        has_client_secret=bool(settings.github_oauth_client_secret.strip()),
+        source="environment",
+    )
+    return GitSettingsOut(
+        connection=GitConnectionOut(
+            provider="github",
+            username=connection.login,
+            email=connection.email,
+            connected=connection.connected,
+            has_token=connection.has_token,
+            default_branch=connection.default_branch,
+            is_enabled=connection.connected,
+        ),
+        repo_targets=[
+            GitRepoTargetOut(
+                id=item.id,
+                name=item.name,
+                repo_url=item.repo_url,
+                default_branch=item.default_branch,
+                is_active=item.is_active,
+            )
+            for item in targets
+        ],
+        github_oauth_client_id=oauth.client_id,
+        has_github_oauth_client_secret=oauth.has_client_secret,
+        github_oauth_source=oauth.source,
+        commit_message_provider=(commit_message_settings.provider if commit_message_settings else "gemini"),
+        commit_message_model=(commit_message_settings.model if commit_message_settings else ""),
+        commit_message_source=(commit_message_settings.source if commit_message_settings else "default"),
+    )
+
+
+class GitHubConnectionUpdateIn(BaseModel):
+    default_branch: str = "main"
+    is_enabled: bool = True
+
+
+@router.get("/github/oauth-config", response_model=GitHubOAuthConfigOut)
+async def get_github_oauth_config(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    oauth = await get_github_oauth_credentials(db)
+    return GitHubOAuthConfigOut(
+        client_id=oauth.client_id,
+        has_client_secret=oauth.has_client_secret,
+        source=oauth.source,
+    )
+
+
+@router.put("/github/oauth-config", response_model=GitHubOAuthConfigOut)
+async def update_github_oauth_config(
+    body: GitHubOAuthConfigIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    client_id = (body.client_id or "").strip()
+    client_secret = (body.client_secret or "").strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="Le client_id GitHub OAuth est requis.")
+
+    oauth = await save_github_oauth_credentials(
+        db,
+        client_id=client_id,
+        client_secret=client_secret if client_secret else None,
+    )
+    return GitHubOAuthConfigOut(
+        client_id=oauth.client_id,
+        has_client_secret=oauth.has_client_secret,
+        source=oauth.source,
+    )
+
+
+@router.put("/git-settings", response_model=GitConnectionOut)
+async def update_git_settings(
+    body: GitHubConnectionUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    current = await get_github_connection_state(db)
+    state = await save_git_connection_state(
+        db,
+        provider="github",
+        username=current.login,
+        email=current.email,
+        token=None,
+        default_branch=body.default_branch,
+        is_enabled=body.is_enabled,
+    )
+    return GitConnectionOut(
+        provider="github",
+        username=state.username,
+        email=state.email,
+        connected=bool(state.has_token and state.enabled),
+        has_token=state.has_token,
+        default_branch=state.default_branch,
+        is_enabled=state.enabled,
+    )
+
+
+@router.put("/git-settings/commit-message", response_model=CommitMessageSettingsOut)
+async def update_commit_message_settings(
+    body: CommitMessageSettingsIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    state = await save_commit_message_generation_state(
+        db,
+        provider=body.provider,
+        model=body.model,
+    )
+    return CommitMessageSettingsOut(
+        provider=state.provider,
+        model=state.model,
+        source=state.source,
+    )
+
+
+@router.get("/github/status", response_model=GitConnectionOut)
+async def get_github_status(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    state = await get_github_connection_state(db)
+    return GitConnectionOut(
+        provider="github",
+        username=state.login,
+        email=state.email,
+        connected=state.connected,
+        has_token=state.connected,
+        default_branch=state.default_branch,
+        is_enabled=state.connected,
+    )
+
+
+@router.post("/github/oauth/start", response_model=GitHubOAuthStartOut)
+async def start_github_oauth(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    try:
+        state = create_github_oauth_state()
+        oauth = await get_github_oauth_credentials(db)
+        url = build_github_oauth_url(state, oauth.client_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return GitHubOAuthStartOut(url=url)
+
+
+@router.get("/github/oauth/callback")
+async def github_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    if error:
+        raise HTTPException(status_code=400, detail=f"Autorisation GitHub annulée: {error}")
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Réponse OAuth GitHub incomplète.")
+    if not consume_github_oauth_state(state):
+        raise HTTPException(status_code=400, detail="État OAuth GitHub invalide ou expiré.")
+
+    try:
+        oauth = await get_github_oauth_credentials(db)
+        client_secret = await get_github_oauth_secret(db)
+        token = await exchange_github_oauth_code(code, client_id=oauth.client_id, client_secret=client_secret)
+        profile = await fetch_github_user_profile(token)
+        await save_github_profile(db, token=token, profile=profile)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=_frontend_admin_url(github_status="connected"), status_code=302)
+
+
+@router.post("/github/disconnect", response_model=GitConnectionOut)
+async def disconnect_github_account(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    state = await disconnect_github(db)
+    return GitConnectionOut(
+        provider=state.provider,
+        username=state.username,
+        email=state.email,
+        connected=False,
+        has_token=False,
+        default_branch=state.default_branch,
+        is_enabled=False,
+    )
+
+
+@router.get("/github/repos", response_model=list[GitHubRepoOut])
+async def list_github_repositories(
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    current = await get_github_connection_state(db)
+    if not current.connected:
+        raise HTTPException(status_code=400, detail="Connecte d'abord GitHub avant de charger les repos.")
+    from app.models.git_integration import GitIntegration
+    result2 = await db.execute(select(GitIntegration).order_by(GitIntegration.updated_at.desc()).limit(1))
+    integration_row = result2.scalar_one_or_none()
+    if integration_row is None or not integration_row.token_encrypted:
+        raise HTTPException(status_code=400, detail="Token GitHub introuvable.")
+    from app.core.llm_router import decrypt_api_key
+    token = decrypt_api_key(integration_row.token_encrypted)
+    try:
+        repos = await fetch_github_repositories(token)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [
+        GitHubRepoOut(
+            name=item.name,
+            full_name=item.full_name,
+            clone_url=item.clone_url,
+            html_url=item.html_url,
+            description=item.description,
+            private=item.private,
+            default_branch=item.default_branch,
+        )
+        for item in repos
+    ]
+
+
+@router.post("/github/repos", response_model=GitHubRepoOut)
+async def create_github_repository_endpoint(
+    body: GitHubRepoCreateIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    current = await get_github_connection_state(db)
+    if not current.connected:
+        raise HTTPException(status_code=400, detail="Connecte d'abord GitHub avant de créer un repo.")
+
+    from app.models.git_integration import GitIntegration
+    result = await db.execute(select(GitIntegration).order_by(GitIntegration.updated_at.desc()).limit(1))
+    integration_row = result.scalar_one_or_none()
+    if integration_row is None or not integration_row.token_encrypted:
+        raise HTTPException(status_code=400, detail="Token GitHub introuvable.")
+    from app.core.llm_router import decrypt_api_key
+    token = decrypt_api_key(integration_row.token_encrypted)
+
+    try:
+        created = await create_github_repository(
+            token,
+            name=body.name.strip(),
+            description=body.description,
+            private=body.private,
+        )
+        target = await add_git_repo_target(
+            db,
+            name=created.name,
+            repo_url=created.clone_url,
+            default_branch=created.default_branch or body.default_branch,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return GitHubRepoOut(
+        name=created.name,
+        full_name=created.full_name,
+        clone_url=created.clone_url,
+        html_url=created.html_url,
+        description=body.description,
+        private=body.private,
+        default_branch=target.default_branch,
+    )
+
+
+@router.post("/git-settings/repos", response_model=GitRepoTargetOut)
+async def create_git_repo_target(
+    body: GitRepoTargetIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    target = await add_git_repo_target(
+        db,
+        name=body.name,
+        repo_url=body.repo_url,
+        repo_full_name=body.repo_full_name,
+        default_branch=body.default_branch,
+    )
+    return GitRepoTargetOut(
+        id=target.id,
+        name=target.name,
+        repo_url=target.repo_url,
+        default_branch=target.default_branch,
+        is_active=target.is_active,
     )
 
 

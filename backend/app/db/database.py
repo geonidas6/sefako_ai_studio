@@ -1,3 +1,4 @@
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -31,7 +32,17 @@ async def get_db():
 
 async def create_tables():
     # Import all models to ensure they are registered
-    from app.models import user, project, llm_config, department, workflow_event  # noqa: F401
+    from app.models import user, project, llm_config, department, workflow_event, git_integration  # noqa: F401
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_git_integration_profile_column)
     print("✅ Tables créées")
+
+
+def _ensure_git_integration_profile_column(sync_conn):
+    inspector = inspect(sync_conn)
+    if not inspector.has_table("git_integrations"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("git_integrations")}
+    if "profile_json" not in columns:
+        sync_conn.execute(text("ALTER TABLE git_integrations ADD COLUMN profile_json TEXT"))

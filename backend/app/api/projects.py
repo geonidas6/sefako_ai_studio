@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, delete
 from pydantic import BaseModel
 
+from app.core.git_publish import GitPublishError, push_workspace_to_git, set_project_git_target
 from app.core.project_workspace import IMPLEMENTATION_PIPELINE_KEY, IMPLEMENTATION_WORKSPACE_KEY, ensure_pipeline_metadata, ensure_within_workspace, get_workspace_settings, initialize_project_workspace, refresh_project_workspace_documents, set_pipeline_phase
 from app.core.security import get_current_admin
 from app.core.llm_router import LLMRouter
@@ -305,11 +306,22 @@ class WorkspaceMoveIn(BaseModel):
     new_path: str
 
 
-class WorkspaceHostExportCommandOut(BaseModel):
-    project_dir: str
-    repo_name: str
-    destination: str
-    command: str
+class GitTargetSelectIn(BaseModel):
+    target_id: str
+    branch: str | None = None
+
+
+class GitPushIn(BaseModel):
+    branch: str | None = None
+
+
+class GitPublishOut(BaseModel):
+    pushed: bool
+    branch: str | None = None
+    commit_sha: str | None = None
+    commit_message: str | None = None
+    remote_url: str | None = None
+    changed_files: list[str] | None = None
 
 
 def project_to_dict(p: Project) -> ProjectOut:
@@ -982,9 +994,10 @@ async def download_project_workspace_archive(
     )
 
 
-@router.get("/{project_id}/workspace/host-export-command", response_model=WorkspaceHostExportCommandOut)
-async def get_project_workspace_host_export_command(
+@router.put("/{project_id}/git/target")
+async def update_project_git_target(
     project_id: str,
+    body: GitTargetSelectIn,
     db: AsyncSession = Depends(get_db),
     _: object = Depends(get_current_admin),
 ):
@@ -992,21 +1005,71 @@ async def get_project_workspace_host_export_command(
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    git_publish = await set_project_git_target(
+        db,
+        project,
+        target_id=body.target_id,
+        branch=body.branch,
+    )
+    await db.refresh(project)
+    return {"success": True, "git_publish": git_publish}
+
+
+@router.post("/{project_id}/git/push", response_model=GitPublishOut)
+async def push_project_to_git(
+    project_id: str,
+    body: GitPushIn,
+    db: AsyncSession = Depends(get_db),
+    _: object = Depends(get_current_admin),
+):
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
     project_dir = _get_workspace_dir(project)
     if project_dir is None or not project_dir.exists():
         raise HTTPException(status_code=404, detail="Workspace projet introuvable")
 
-    repo_name = project_dir.name
-    if not repo_name or "/" in repo_name or repo_name in {".", ".."}:
-        raise HTTPException(status_code=400, detail="Nom de workspace invalide")
+    deliverables = dict(project.final_deliverables or {})
+    git_publish = deliverables.get("git_publish")
+    if not isinstance(git_publish, dict) or not git_publish.get("target_id"):
+        raise HTTPException(status_code=400, detail="Sélectionne d'abord un repo cible dans la configuration Git.")
 
-    destination = f"/opt/{repo_name}"
-    command = f"cd /opt/sefako_ai_studio && ./scripts/export_workspace_to_host.sh {project.id}"
-    return WorkspaceHostExportCommandOut(
-        project_dir=str(project_dir),
-        repo_name=repo_name,
-        destination=destination,
-        command=command,
+    target_id = str(git_publish.get("target_id") or "").strip()
+    branch = (body.branch or git_publish.get("branch") or "").strip() or None
+
+    from app.models.git_integration import GitIntegration, GitRepositoryTarget
+
+    target = await db.get(GitRepositoryTarget, target_id)
+    if target is None or not target.is_active:
+        raise HTTPException(status_code=404, detail="Repo cible introuvable ou désactivé")
+
+    result = await db.execute(select(GitIntegration).order_by(GitIntegration.updated_at.desc()).limit(1))
+    integration = result.scalar_one_or_none()
+    if integration is None or not integration.is_enabled or not integration.token_encrypted:
+        raise HTTPException(status_code=400, detail="La connexion Git n'est pas configurée dans l'administration.")
+
+    try:
+        outcome = await push_workspace_to_git(
+            db,
+            project=project,
+            project_dir=project_dir,
+            target=target,
+            integration=integration,
+            branch_override=branch,
+        )
+    except GitPublishError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return GitPublishOut(
+        pushed=bool(outcome.get("pushed")),
+        branch=outcome.get("branch"),
+        commit_sha=outcome.get("commit_sha"),
+        commit_message=outcome.get("commit_message"),
+        remote_url=outcome.get("remote_url"),
+        changed_files=outcome.get("changed_files") or [],
     )
 
 

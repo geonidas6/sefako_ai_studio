@@ -35,8 +35,6 @@ import {
   FolderPlus,
   Folder,
   FileCode2,
-  Upload,
-  Copy
 } from 'lucide-react';
 import { api } from '../../../lib/api';
 import { connectProjectWs, WsEvent } from '../../../lib/websocket';
@@ -89,6 +87,29 @@ function stripMarkdown(md: string = ''): string {
 interface GenerationSettings {
   root_path: string;
   require_technical_approval: boolean;
+}
+
+interface GitConnection {
+  provider: string;
+  username: string | null;
+  email: string | null;
+  connected: boolean;
+  has_token: boolean;
+  default_branch: string;
+  is_enabled: boolean;
+}
+
+interface GitRepoTarget {
+  id: string;
+  name: string;
+  repo_url: string;
+  default_branch: string;
+  is_active: boolean;
+}
+
+interface GitSettings {
+  connection: GitConnection;
+  repo_targets: GitRepoTarget[];
 }
 
 declare global {
@@ -266,6 +287,20 @@ export default function ProjectDashboard() {
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
   const [isAdminSession, setIsAdminSession] = useState(false);
   const [generationSettings, setGenerationSettings] = useState<GenerationSettings>({ root_path: '/opt', require_technical_approval: true });
+  const [gitSettings, setGitSettings] = useState<GitSettings>({
+    connection: {
+      provider: 'custom',
+      username: '',
+      email: '',
+      connected: false,
+      has_token: false,
+      default_branch: 'main',
+      is_enabled: false,
+    },
+    repo_targets: [],
+  });
+  const [selectedGitTargetId, setSelectedGitTargetId] = useState('');
+  const [selectedGitBranch, setSelectedGitBranch] = useState('');
   const [startingTechnicalDesign, setStartingTechnicalDesign] = useState(false);
   const [startingImplementation, setStartingImplementation] = useState(false);
   const [workspaceFiles, setWorkspaceFiles] = useState<{ path: string; name: string; is_dir?: boolean; kind?: string }[]>([]);
@@ -278,8 +313,7 @@ export default function ProjectDashboard() {
   const [creatingWorkspaceEntry, setCreatingWorkspaceEntry] = useState(false);
   const [newWorkspacePath, setNewWorkspacePath] = useState('');
   const [workspaceMovePath, setWorkspaceMovePath] = useState('');
-  const [workspaceExportCommand, setWorkspaceExportCommand] = useState('');
-  const [loadingWorkspaceExport, setLoadingWorkspaceExport] = useState(false);
+  const [loadingGitPush, setLoadingGitPush] = useState(false);
 
   const [logs, setLogs] = useState<{ text: string; type?: 'info' | 'success' | 'error' | 'system' }[]>([]);
   const [chatInput, setChatInput] = useState('');
@@ -353,7 +387,34 @@ export default function ProjectDashboard() {
     if (!api.auth.isLoggedIn()) return;
     setIsAdminSession(true);
     api.admin.getGenerationSettings().then(setGenerationSettings).catch(() => {});
+    api.admin.getGitSettings().then(setGitSettings).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const gitPublish = project?.final_deliverables?.git_publish;
+    if (gitPublish && typeof gitPublish === 'object') {
+      const targetId = String(gitPublish.target_id || '').trim();
+      const branch = String(gitPublish.branch || '').trim();
+      if (targetId) setSelectedGitTargetId(targetId);
+      if (branch) setSelectedGitBranch(branch);
+    }
+  }, [project?.final_deliverables?.git_publish]);
+
+  useEffect(() => {
+    if (selectedGitTargetId) return;
+    const firstTarget = gitSettings.repo_targets[0];
+    if (!firstTarget) return;
+    setSelectedGitTargetId(firstTarget.id);
+    setSelectedGitBranch(firstTarget.default_branch || gitSettings.connection.default_branch || 'main');
+  }, [gitSettings.repo_targets, gitSettings.connection.default_branch, selectedGitTargetId]);
+
+  useEffect(() => {
+    const target = gitSettings.repo_targets.find((item) => item.id === selectedGitTargetId);
+    if (!target) return;
+    if (!selectedGitBranch) {
+      setSelectedGitBranch(target.default_branch || gitSettings.connection.default_branch || 'main');
+    }
+  }, [selectedGitTargetId, gitSettings.repo_targets, gitSettings.connection.default_branch, selectedGitBranch]);
 
   useEffect(() => {
     const workspaceProjectDir = project?.final_deliverables?.implementation_workspace?.project_dir;
@@ -606,26 +667,38 @@ export default function ProjectDashboard() {
     }
   };
 
-  const handlePublishWorkspace = async () => {
+  const handlePushToGit = async () => {
     if (!isAdminSession) return;
-    setLoadingWorkspaceExport(true);
+    if (!selectedGitTargetId) {
+      setLogs((prev) => [...prev, { text: 'Sélectionne d’abord un repo cible.', type: 'error' }]);
+      return;
+    }
+    setLoadingGitPush(true);
     try {
-      const data = await api.projects.getWorkspaceHostExportCommand(projectId);
-      const command = String(data?.command || '').trim();
-      setWorkspaceExportCommand(command);
-      if (command && navigator?.clipboard?.writeText) {
-        await navigator.clipboard.writeText(command);
-      }
+      const selection = await api.projects.updateGitTarget(projectId, selectedGitTargetId, selectedGitBranch || undefined);
+      const gitPublish = selection?.git_publish || {};
+      setProject((current: any) => current ? {
+        ...current,
+        final_deliverables: {
+          ...(current.final_deliverables || {}),
+          git_publish: gitPublish,
+        },
+      } : current);
+
+      const pushResult = await api.projects.pushToGit(projectId, selectedGitBranch || undefined);
+      const branch = String(pushResult?.branch || selectedGitBranch || '').trim();
+      const commitMessage = String(pushResult?.commit_message || '').trim();
+      const commitSha = String(pushResult?.commit_sha || '').trim();
       setLogs((prev) => [...prev, {
-        text: command
-          ? `Commande d'export prête pour /opt. Elle a été copiée dans le presse-papiers.`
-          : 'Commande d\'export introuvable.',
-        type: command ? 'success' : 'error',
+        text: pushResult?.pushed
+          ? `Push Git réussi${commitSha ? ` (${commitSha.slice(0, 8)})` : ''}${branch ? ` sur ${branch}` : ''}${commitMessage ? ` - ${commitMessage}` : ''}.`
+          : 'Aucun changement à pousser.',
+        type: pushResult?.pushed ? 'success' : 'info',
       }]);
     } catch (err: any) {
-      setLogs((prev) => [...prev, { text: err.message || 'Impossible de préparer la publication vers /opt.', type: 'error' }]);
+      setLogs((prev) => [...prev, { text: err.message || 'Impossible de pousser vers Git.', type: 'error' }]);
     } finally {
-      setLoadingWorkspaceExport(false);
+      setLoadingGitPush(false);
     }
   };
 
@@ -1259,6 +1332,45 @@ export default function ProjectDashboard() {
                 <p><strong>Dossier projet :</strong> <code>{workspaceInfo.project_dir}</code></p>
                 <p><strong>Racine :</strong> <code>{workspaceInfo.root_path}</code></p>
                 <p><strong>Fichiers initialisés :</strong> {Array.isArray(workspaceInfo.files) ? workspaceInfo.files.length : 0}</p>
+                {isAdminSession && (
+                  <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] gap-3 rounded-xl border border-border/60 bg-background/80 p-3">
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Repo cible</label>
+                      <select
+                        value={selectedGitTargetId}
+                        onChange={(event) => {
+                          const targetId = event.target.value;
+                          setSelectedGitTargetId(targetId);
+                          const target = gitSettings.repo_targets.find((item) => item.id === targetId);
+                          if (target) {
+                            setSelectedGitBranch(target.default_branch || gitSettings.connection.default_branch || 'main');
+                          }
+                        }}
+                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+                      >
+                        {gitSettings.repo_targets.length === 0 ? (
+                          <option value="">Aucun repo configuré</option>
+                        ) : (
+                          gitSettings.repo_targets.map((repo) => (
+                            <option key={repo.id} value={repo.id}>
+                              {repo.name}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Branche</label>
+                      <input
+                        value={selectedGitBranch}
+                        onChange={(event) => setSelectedGitBranch(event.target.value)}
+                        placeholder="main"
+                        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap gap-2">
                   <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadMarkdown}>
                     <Download className="h-3.5 w-3.5" /> Export Markdown
@@ -1273,25 +1385,17 @@ export default function ProjectDashboard() {
                       <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handleDownloadWorkspace}>
                         <FolderTree className="h-3.5 w-3.5" /> Télécharger le repo ZIP
                       </Button>
-                      <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handlePublishWorkspace} disabled={loadingWorkspaceExport}>
-                        {loadingWorkspaceExport ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-                        Publier vers /opt
+                      <Button type="button" variant="outline" size="sm" className="gap-2" onClick={handlePushToGit} disabled={loadingGitPush || !selectedGitTargetId}>
+                        {loadingGitPush ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitBranch className="h-3.5 w-3.5" />}
+                        Push GitHub
                       </Button>
                     </>
                   )}
                 </div>
-                {workspaceExportCommand && isAdminSession && (
-                  <div className="rounded-xl border border-border/60 bg-background/80 p-3 space-y-2">
-                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-                      <Copy className="h-3.5 w-3.5 text-primary" /> Commande d'export
-                    </div>
-                    <code className="block overflow-x-auto rounded-lg border border-border/50 bg-muted/50 px-3 py-2 text-xs text-foreground">
-                      {workspaceExportCommand}
-                    </code>
-                    <p className="text-[11px] text-muted-foreground">
-                      Lance cette commande depuis le VPS pour copier le workspace du projet dans `/opt`.
-                    </p>
-                  </div>
+                {isAdminSession && gitSettings.repo_targets.length === 0 && (
+                  <p className="text-[11px] text-amber-500">
+                    Aucun repo cible n’est configuré. Ajoute d’abord un repo dans l’administration Git.
+                  </p>
                 )}
               </CardContent>
             </Card>
