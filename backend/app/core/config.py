@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openrouter_api_key: str = ""
     nvidia_api_key: str = ""
+    huggingface_api_key: str = ""
     mistral_api_key: str = ""
     qwen_api_key: str = ""
     azure_openai_api_key: str = ""

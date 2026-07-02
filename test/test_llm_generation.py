@@ -1,115 +1,78 @@
+from __future__ import annotations
+
 import asyncio
-import json
+import tempfile
 from pathlib import Path
-from typing import Any
 
-from app.core.project_workspace import (
-    _parse_json_response,
-    _backend_file_specs,
-    _frontend_file_specs,
-    generate_application_foundation
-)
+from app.core.project_workspace import generate_application_foundation
 
-def test_parse_json_response():
-    print("Testing _parse_json_response...")
-    
-    # Test 1: JSON parfait
-    raw1 = '{"files": [{"path": "backend/app/main.py", "content": "print(\'hello\')"}]}'
-    res1 = _parse_json_response(raw1)
-    assert res1 is not None
-    assert res1["files"][0]["path"] == "backend/app/main.py"
-    print("Test 1 OK")
-    
-    # Test 2: JSON enveloppé de markdown triple backticks
-    raw2 = """```json
-{
-  "files": [
-    {"path": "backend/Dockerfile", "content": "FROM python"}
-  ]
-}
-```"""
-    res2 = _parse_json_response(raw2)
-    assert res2 is not None
-    assert res2["files"][0]["path"] == "backend/Dockerfile"
-    print("Test 2 OK")
 
-    # Test 3: Texte avant/après le JSON
-    raw3 = """Voici la réponse demandée:
-{
-  "files": [
-    {"path": "test.txt", "content": "ok"}
-  ]
-}
-Et voilà."""
-    res3 = _parse_json_response(raw3)
-    assert res3 is not None
-    assert res3["files"][0]["path"] == "test.txt"
-    print("Test 3 OK")
+async def test_workspace_generates_documents_only() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        project_dir = Path(tmp_dir) / "demo-project"
+        result = await generate_application_foundation(
+            project_dir=str(project_dir),
+            project_id="demo-123",
+            project_title="Mon Projet Test",
+            input_text=(
+                "Backend FastAPI, frontend React, base PostgreSQL, "
+                "sans application mobile. Le studio doit produire les documents Markdown."
+            ),
+            deliverables={
+                "cdc": "Un super projet de cadrage documentaire.",
+                "architecture": "FastAPI + React + PostgreSQL.",
+                "roadmap": "Phase 1: cadrage",
+            },
+            llm_router=None,
+        )
 
-async def test_fallback_specs():
-    print("Testing fallback specs generation...")
-    project_title = "Mon Projet Test"
-    deliverables = {
-        "cdc": "Un super projet",
-        "architecture": "FastAPI + Next.js",
-        "roadmap": "Phase 1: MVP"
-    }
-    stack = {
-        "backend": "fastapi",
-        "frontend": "nextjs",
-        "generation_backend": "fastapi",
-        "generation_frontend": "nextjs"
-    }
-    
-    # Test sans llm_router (fallback sur templates statiques)
-    backend_specs = await _backend_file_specs(project_title, deliverables, stack, llm_router=None)
-    assert len(backend_specs) > 0
-    assert any(path == "backend/app/main.py" for path, _ in backend_specs)
-    print("Backend Fallback OK")
+        generated_files = result["files"]
+        assert generated_files, "Le workspace doit produire au moins un fichier documentaire."
+        assert all("backend/" not in path and "frontend/" not in path for path in generated_files)
+        assert any(path.endswith("README.md") for path in generated_files)
+        assert any(path.endswith("docs/architecture.md") for path in generated_files)
+        assert any(path.endswith("docs/global_environment.md") for path in generated_files)
+        assert any(path.endswith("docs/stack_decision.md") for path in generated_files)
+        assert any(path.endswith("docs/user_stories.md") for path in generated_files)
+        assert any(path.endswith("docs/functional_spec.md") for path in generated_files)
+        assert any(path.endswith("docs/interface_spec.md") for path in generated_files)
+        assert any(path.endswith("docs/mld.md") for path in generated_files)
+        assert any(path.endswith("docs/api_contract.md") for path in generated_files)
+        assert any(path.endswith("docs/ide_generation_prompt.md") for path in generated_files)
 
-    frontend_specs = await _frontend_file_specs(project_title, deliverables, stack, llm_router=None)
-    assert len(frontend_specs) > 0
-    assert any(path == "frontend/app/page.tsx" for path, _ in frontend_specs)
-    print("Frontend Fallback OK")
+        readme = (project_dir / "README.md").read_text(encoding="utf-8")
+        global_environment = (project_dir / "docs/global_environment.md").read_text(encoding="utf-8")
+        architecture = (project_dir / "docs/architecture.md").read_text(encoding="utf-8")
+        ide_prompt = (project_dir / "docs/ide_generation_prompt.md").read_text(encoding="utf-8")
+        user_stories = (project_dir / "docs/user_stories.md").read_text(encoding="utf-8")
+        functional_spec = (project_dir / "docs/functional_spec.md").read_text(encoding="utf-8")
+        interface_spec = (project_dir / "docs/interface_spec.md").read_text(encoding="utf-8")
+        mld = (project_dir / "docs/mld.md").read_text(encoding="utf-8")
+        api_contract = (project_dir / "docs/api_contract.md").read_text(encoding="utf-8")
 
-class MockLLMRouter:
-    def __init__(self, response_text: str):
-        self.response_text = response_text
-    async def generate(self, prompt: str, agent_type: str, system_prompt: str = "") -> str:
-        return self.response_text
+        assert "éditeur web" in readme.lower()
+        assert "markdown" in readme.lower()
+        assert "docker_manager" in global_environment
+        assert "traefik_master" in global_environment
+        assert "portfolio_grace" in global_environment
+        assert "kaba-compta" in global_environment
+        assert "couches" in architecture.lower() or "couche" in architecture.lower()
+        assert "proxy_net" in architecture
+        assert "postgresql" in architecture.lower()
+        assert "user stories" in user_stories.lower()
+        assert "fonctionnal" in functional_spec.lower()
+        assert "écran" in interface_spec.lower() or "ecran" in interface_spec.lower()
+        assert "mld" in mld.lower()
+        assert "endpoint" in api_contract.lower()
+        assert "user stories" in ide_prompt.lower()
+        assert "mld" in ide_prompt.lower()
+        assert "contrats api" in ide_prompt.lower()
 
-async def test_llm_generation_with_router():
-    print("Testing generate_application_foundation with a mock LLMRouter...")
-    
-    # Réponse simulée du LLM pour le backend
-    mock_backend_json = """{
-      "files": [
-        {"path": "backend/Dockerfile", "content": "FROM python:3.11-slim"},
-        {"path": "backend/app/main.py", "content": "# Code FastAPI généré par l'IA\\nprint('App active')\\n"}
-      ]
-    }"""
-    
-    # Création d'un mock router
-    mock_router = MockLLMRouter(mock_backend_json)
-    
-    project_title = "Mon Projet Test"
-    deliverables = {"cdc": "Un super projet"}
-    stack = {"backend": "fastapi"}
-    
-    backend_specs = await _backend_file_specs(project_title, deliverables, stack, llm_router=mock_router)
-    
-    assert len(backend_specs) == 2
-    assert backend_specs[0][0] == "backend/Dockerfile"
-    assert "FROM python:3.11-slim" in backend_specs[0][1]
-    assert backend_specs[1][0] == "backend/app/main.py"
-    assert "App active" in backend_specs[1][1]
-    print("Mock LLMRouter specs generation OK")
 
-async def main():
-    test_parse_json_response()
-    await test_fallback_specs()
-    await test_llm_generation_with_router()
-    print("Tous les tests de génération de code ont réussi !")
+def main() -> None:
+    asyncio.run(test_workspace_generates_documents_only())
+    print("Les documents de cadrage sont générés sans code applicatif.")
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

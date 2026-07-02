@@ -306,7 +306,8 @@ def make_synthesis_prompt(input_text: str, r1: dict, critiques: dict) -> str:
     r1_text = "\n\n".join([f"### {k.upper()}\n{clamp_text(v, 1800)}" for k, v in r1.items()])
     critiques_text = "\n\n".join([f"### Critique {k.upper()}\n{clamp_text(v, 1200)}" for k, v in critiques.items()])
 
-    return f"""Tu dois synthétiser les travaux de 4 départements IA sur ce projet:
+    return f"""Tu dois consolider les travaux de 4 départements IA sur ce projet.
+Les employés ont déjà rédigé les brouillons Markdown initiaux; ton rôle n'est pas de repartir de zéro, mais de préserver leur contenu utile et d'arbitrer les écarts.
 
 PROJET:
 {clamp_text(input_text, 3500)}
@@ -323,6 +324,7 @@ RÈGLE ABSOLUE DE CONSOLIDATION :
 - Si un élément du Round 1 reste valable et n'est pas invalidé par une critique, il doit rester visible dans le livrable final.
 - Le MCD final doit être au moins aussi riche que le MCD d'ingénierie validé auparavant.
 - N'abrège pas à l'excès : préfère une synthèse consolidée et complète à une version trop courte.
+- Si possible, réutilise la formulation et la structure déjà produites par les employés au lieu d'introduire un nouveau cadrage.
 
 Produis maintenant un JSON valide (sans markdown, juste le JSON brut) avec cette structure exacte:
 {{

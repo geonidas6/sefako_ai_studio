@@ -402,7 +402,7 @@ async def add_project_message(project_id: str, body: ProjectMessageIn, db: Async
                 prompt=_project_question_prompt(project, content),
                 agent_type="orchestrator",
                 system_prompt="Tu es l'orchestrateur d'une agence IA. Tu réponds aux questions du client avec précision, clarté et cohérence avec le projet.",
-                fallback_providers=["gemini", "anthropic", "openai", "deepseek", "groq", "mistral", "qwen", "azure_openai", "bedrock", "openrouter"],
+                fallback_providers=["gemini", "anthropic", "openai", "deepseek", "groq", "huggingface", "mistral", "qwen", "azure_openai", "bedrock", "openrouter"],
             )
             await publish_project_event(project_id, {
                 "type": "employee_message",
@@ -626,11 +626,13 @@ async def start_technical_design(
         raise HTTPException(status_code=409, detail="Validation administrateur requise avant de lancer la phase conception technique.")
 
     deliverables = ensure_pipeline_metadata(dict(project.final_deliverables or {}), settings)
+    llm_router = LLMRouter(db)
     workspace_info = await initialize_project_workspace(
         root_path=settings.root_path,
         project_id=project.id,
         project_title=project.title,
         deliverables={**deliverables, "input_text": project.input_text},
+        llm_router=llm_router,
     )
     deliverables[IMPLEMENTATION_WORKSPACE_KEY] = workspace_info
     pipeline = dict(deliverables.get(IMPLEMENTATION_PIPELINE_KEY) or {})

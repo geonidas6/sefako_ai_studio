@@ -187,6 +187,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
             if not project:
                 raise ValueError('Projet non trouvé')
             settings = await get_workspace_settings(db)
+            llm_router = LLMRouter(db)
             deliverables = ensure_pipeline_metadata(project.final_deliverables or {}, settings)
             workspace = deliverables.get(IMPLEMENTATION_WORKSPACE_KEY)
             if not isinstance(workspace, dict) or not workspace.get('project_dir'):
@@ -195,6 +196,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
                     project_id=project.id,
                     project_title=project.title,
                     deliverables={**deliverables, 'input_text': project.input_text},
+                    llm_router=llm_router,
                 )
                 deliverables[IMPLEMENTATION_WORKSPACE_KEY] = workspace
             pipeline = dict(deliverables.get(IMPLEMENTATION_PIPELINE_KEY) or {})
@@ -231,21 +233,23 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
 
         pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je consolide le cadrage Markdown: CDC, MCD, architecture, roadmap, matrice et pack documentaire pour l'éditeur web.", 'documentation_pack', 'docs/global_environment.md')
+        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je rédige le cadrage Markdown côté stratégie: CDC, roadmap et synthèse métier.", 'documentation_pack', 'docs/cdc.md')
+        await _employee_message(project_id, 'engineering', 'Ingénierie', employees['engineering'], "Je rédige les documents techniques: MCD, architecture et décision de stack.", 'documentation_pack', 'docs/mcd.md')
+        await _employee_message(project_id, 'devops', 'DevOps', employees['devops'], "Je rédige les documents de livraison: README, environnement, plan d'implémentation et matrice de couverture.", 'documentation_pack', 'README.md')
         await _publish_pipeline(project_id, pipeline, 'Pack documentaire préparé.')
         pipeline = set_pipeline_phase(pipeline, 'documentation_pack', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
 
         pipeline = set_pipeline_phase(pipeline, 'editor_bootstrap', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Le contexte Markdown est prêt et le dossier projet peut être ouvert dans l'éditeur web.", 'editor_bootstrap', 'éditeur web')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Le contexte Markdown a été rédigé par les employés et le dossier projet peut être ouvert dans l'éditeur web.", 'editor_bootstrap', 'éditeur web')
         await _publish_pipeline(project_id, pipeline, "Le workspace est prêt pour l'édition dans l'IDE web.")
         pipeline = set_pipeline_phase(pipeline, 'editor_bootstrap', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
 
         pipeline = set_pipeline_phase(pipeline, 'requirements_coverage', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je relis le CDC et la décision de stack pour vérifier que chaque exigence est couverte par les documents et le handoff.", 'requirements_coverage', 'docs/requirements_matrix.md')
+        await _employee_message(project_id, 'strategy', 'Stratégie', employees['strategy'], "Je relis le CDC et la décision de stack pour vérifier que chaque exigence est couverte par les documents rédigés par les employés.", 'requirements_coverage', 'docs/requirements_matrix.md')
         validation = validate_workspace_delivery(
             project_dir=workspace['project_dir'],
             project_id=project_id,
@@ -258,7 +262,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
 
         pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'devops', 'DevOps', employees['devops'], "Je lance les contrôles de conformité documentaire et le garde-fou workspace.", 'automated_validation', 'docs/test_report.md')
+        await _employee_message(project_id, 'devops', 'DevOps', employees['devops'], "Je lance les contrôles de conformité documentaire sur les fichiers Markdown rédigés par les employés et je vérifie le garde-fou workspace.", 'automated_validation', 'docs/test_report.md')
         if not validation.get('success'):
             raise ValueError('Validation documentaire échouée: ' + ', '.join(validation.get('missing_files') or ['contrôle statique invalide']))
         pipeline = set_pipeline_phase(pipeline, 'automated_validation', 'completed', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
@@ -266,7 +270,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
 
         pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'running', overall_status='running', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [])
         deliverables = await _save_pipeline(project_id, pipeline, deliverables)
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture documentaire, validation et passage vers l'éditeur web.", 'delivery_review', 'docs/delivery_review.md')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Je consolide la revue finale: couverture documentaire rédigée par les employés, validation et passage vers l'éditeur web.", 'delivery_review', 'docs/delivery_review.md')
         pipeline = set_pipeline_phase(pipeline, 'delivery_review', 'completed', overall_status='completed', project_dir=workspace['project_dir'], generated_files=workspace.get('files') or [], last_error=None)
 
         deliverables[IMPLEMENTATION_WORKSPACE_KEY] = {
@@ -284,7 +288,7 @@ async def _run_pipeline(project_id: str, project_title: str, input_text: str) ->
                 project.final_deliverables = deliverables
                 await db.commit()
 
-        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Le cadrage est prêt. L'éditeur web peut maintenant ouvrir le workspace dédié pour produire le code source.", 'implementation_complete', 'éditeur web')
+        await _employee_message(project_id, 'orchestrator', 'Orchestrateur', employees['orchestrator'], "Le cadrage est prêt. L'éditeur web peut maintenant ouvrir le workspace dédié pour finaliser le travail applicatif manuellement.", 'implementation_complete', 'éditeur web')
         await publish_project_event(project_id, {
             'type': 'implementation_complete',
             'message': "Phase documentaire terminée. Le workspace est prêt pour l'éditeur web.",

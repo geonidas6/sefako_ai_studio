@@ -13,7 +13,11 @@ import {
   History,
   Trash2,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  FileText,
+  Bot,
+  Sparkles,
+  Layers3
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { Button } from '@/components/ui/button';
@@ -92,6 +96,33 @@ export default function LandingPage() {
     }
   ];
 
+  const workflowSteps = [
+    {
+      title: '1. Les employés rédigent les docs',
+      icon: FileText,
+      description: 'Chaque spécialité produit ses fichiers Markdown: user stories, specs, architecture, MLD, API et environnement.',
+      tone: 'from-pink-500/20 to-pink-500/5'
+    },
+    {
+      title: '2. L’orchestrateur relit et valide',
+      icon: Sparkles,
+      description: 'L’orchestrateur centralise, vérifie la cohérence, complète les angles morts et prépare le prompt final.',
+      tone: 'from-violet-500/20 to-violet-500/5'
+    },
+    {
+      title: '3. L’IA de l’IDE génère l’app',
+      icon: Bot,
+      description: 'L’IA lit tous les `.md`, respecte le stack validé et reconstruit l’application fidèle au cadrage.',
+      tone: 'from-cyan-500/20 to-cyan-500/5'
+    },
+    {
+      title: '4. L’application finale est livrée',
+      icon: Layers3,
+      description: 'Le résultat est une app complète, alignée sur les documents et prête à être déployée.',
+      tone: 'from-emerald-500/20 to-emerald-500/5'
+    }
+  ];
+
   return (
     <div className="flex flex-col items-center">
       {/* Hero Section */}
@@ -129,6 +160,82 @@ export default function LandingPage() {
                 Explorer l'historique
               </Link>
             </Button>
+          </div>
+        </motion.div>
+      </section>
+
+      {/* Workflow Schema */}
+      <section className="w-full max-w-7xl mx-auto px-6 pb-6">
+        <motion.div
+          initial={{ opacity: 0, y: 24 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.6 }}
+          className="rounded-3xl border border-border/60 bg-gradient-to-br from-background via-muted/10 to-background p-6 md:p-8 shadow-2xl shadow-primary/5"
+        >
+          <div className="flex flex-col gap-3 mb-8">
+            <span className="inline-flex w-fit items-center rounded-full border border-primary/20 bg-primary/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-primary">
+              Comment ça fonctionne
+            </span>
+            <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+              <div>
+                <h2 className="text-3xl font-bold font-display tracking-tight">Chaîne de production de l’app</h2>
+                <p className="max-w-2xl text-muted-foreground">
+                  Les employés écrivent le cadrage, l’orchestrateur le consolide, puis l’IA de l’IDE génère l’application finale à partir des documents validés.
+                </p>
+              </div>
+              <div className="text-sm text-muted-foreground">
+                Flux de travail: <span className="text-foreground font-medium">docs → validation → génération</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 items-stretch">
+            {workflowSteps.map((step, index) => (
+              <div key={step.title} className="relative">
+                <motion.div
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ duration: 0.45, delay: index * 0.08 }}
+                  className={cn(
+                    "h-full rounded-2xl border border-border/60 bg-gradient-to-br p-5 backdrop-blur-sm",
+                    step.tone
+                  )}
+                >
+                  <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl border border-white/10 bg-background/70 text-primary shadow-lg shadow-primary/10">
+                    <step.icon className="h-6 w-6" />
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="text-lg font-semibold">{step.title}</h3>
+                    <p className="text-sm leading-relaxed text-muted-foreground">{step.description}</p>
+                  </div>
+                </motion.div>
+
+                {index < workflowSteps.length - 1 && (
+                  <div className="hidden lg:flex absolute top-1/2 -right-5 z-10 -translate-y-1/2 items-center justify-center">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full border border-border bg-background shadow-lg">
+                      <ArrowRight className="h-4 w-4 text-primary" />
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="rounded-2xl border border-border/60 bg-background/60 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Entrée</p>
+              <p className="mt-2 text-sm text-foreground">Les employés produisent des fichiers Markdown détaillés, rôle par rôle.</p>
+            </div>
+            <div className="rounded-2xl border border-border/60 bg-background/60 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Contrôle</p>
+              <p className="mt-2 text-sm text-foreground">L’orchestrateur vérifie la cohérence et s’assure que tout est complet.</p>
+            </div>
+            <div className="rounded-2xl border border-border/60 bg-background/60 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Sortie</p>
+              <p className="mt-2 text-sm text-foreground">L’IA de l’IDE génère l’application finale fidèle aux documents validés.</p>
+            </div>
           </div>
         </motion.div>
       </section>

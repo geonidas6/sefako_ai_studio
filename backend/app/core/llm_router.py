@@ -1,6 +1,6 @@
 """
 LLM Router — Couche d'abstraction multi-fournisseurs.
-Supporte: Gemini, DeepSeek, Claude (Anthropic), OpenAI/GPT, Azure OpenAI, Bedrock, Grok (xAI), Groq, Mistral, Qwen, Mock.
+Supporte: Gemini, DeepSeek, Claude (Anthropic), OpenAI/GPT, Azure OpenAI, Bedrock, Grok (xAI), Groq, Hugging Face, Mistral, Qwen, Mock.
 """
 from __future__ import annotations
 
@@ -101,6 +101,15 @@ PROVIDERS = {
         ],
         "default_model": "nvidia/nemotron-3-ultra-550b-a55b",
     },
+    "huggingface": {
+        "name": "Hugging Face",
+        "models": [
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "mistralai/Mistral-7B-Instruct-v0.3",
+            "Qwen/Qwen2.5-7B-Instruct",
+        ],
+        "default_model": "meta-llama/Llama-3.1-8B-Instruct",
+    },
     "grok": {
         "name": "xAI Grok",
         "models": ["grok-3", "grok-3-mini", "grok-3-fast"],
@@ -166,6 +175,7 @@ DEFAULT_REQUESTS_PER_MINUTE = {
     "openai": 10,
     "openrouter": 5,
     "nvidia": 5,
+    "huggingface": 5,
     "grok": 5,
     "groq": 2,
     "mistral": 10,
@@ -243,8 +253,9 @@ Entités: User, Project, Deliverable, LLMConfig, AgentRun
 Relations: User 1→N Projects, Project 1→N Deliverables, Project 1→N AgentRuns
 
 ### Stack validée
-- Backend: FastAPI + LangGraph + PostgreSQL
-- Frontend: Next.js + TypeScript
+- Backend: FastAPI + PostgreSQL
+- Frontend: React + TypeScript
+- Mobile: none
 - Infra: Docker Compose + Traefik
 
 ### Modules prioritaires (MVP)
@@ -278,7 +289,7 @@ Relations: User 1→N Projects, Project 1→N Deliverables, Project 1→N AgentR
 ## Synthèse Finale — Livrables AIA
 
 ### CDC Généré
-Projet validé par les 4 départements. Architecture FastAPI + Next.js recommandée.
+Projet validé par les 4 départements. Architecture FastAPI + React recommandée.
 
 ### MCD Final
 User → Projects → Deliverables (1-N-N)
@@ -291,8 +302,9 @@ LLMConfig → Singleton admin
 - Phase 3 (M7-12): Multi-stack + collaboration
 
 ### Architecture recommandée
-Backend: FastAPI 0.115 / LangGraph 0.2 / PostgreSQL 16
-Frontend: Next.js 14 / TypeScript / Vanilla CSS
+Backend: FastAPI / PostgreSQL 16
+Frontend: React / TypeScript
+Mobile: none
 """,
 }
 
@@ -420,6 +432,7 @@ class LLMRouter:
                 "openai": settings.openai_api_key,
                 "openrouter": settings.openrouter_api_key,
                 "nvidia": settings.nvidia_api_key,
+                "huggingface": settings.huggingface_api_key,
                 "grok": settings.grok_api_key,
                 "groq": settings.groq_api_key,
                 "mistral": settings.mistral_api_key,
@@ -663,6 +676,15 @@ class LLMRouter:
                 model=model,
                 api_key=api_key,
                 base_url="https://integrate.api.nvidia.com/v1",
+                temperature=0.4,
+                max_tokens=1800,
+            )
+        elif provider == "huggingface":
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model,
+                api_key=api_key,
+                base_url="https://router.huggingface.co/v1",
                 temperature=0.4,
                 max_tokens=1800,
             )

@@ -137,6 +137,7 @@ const providerKeyLinks: Record<string, string> = {
   openai: 'https://platform.openai.com/api-keys',
   openrouter: 'https://openrouter.ai/docs/quickstart',
   nvidia: 'https://build.nvidia.com/',
+  huggingface: 'https://huggingface.co/settings/tokens',
   grok: 'https://console.x.ai/',
   groq: 'https://console.groq.com/keys',
   mistral: 'https://console.mistral.ai/api-keys',
@@ -147,6 +148,7 @@ const providerKeyLinks: Record<string, string> = {
 
 const providerSetupNotes: Record<string, string> = {
   deepseek: 'Compatible OpenAI endpoint. Utilise une clé DeepSeek classique.',
+  huggingface: 'Utilise un token Hugging Face et un modèle compatible avec l’endpoint OpenAI-compatible de l’API d’inférence.',
   azure_openai: 'Nécessite AZURE_OPENAI_ENDPOINT et AZURE_OPENAI_API_VERSION côté backend.',
   bedrock: 'Utilise les identifiants AWS du backend et la variable BEDROCK_REGION.',
 };
