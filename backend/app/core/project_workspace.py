@@ -2387,7 +2387,7 @@ def _api_contract(project_title: str, input_text: str, deliverables: dict[str, A
 
 ## Exemples de contrat
 ### `GET /health`
-- réponse: `{"status":"ok"}`
+- réponse: `{{"status":"ok"}}`
 
 ### `GET /api/...`
 - usage: lecture de données

@@ -626,13 +626,11 @@ async def start_technical_design(
         raise HTTPException(status_code=409, detail="Validation administrateur requise avant de lancer la phase conception technique.")
 
     deliverables = ensure_pipeline_metadata(dict(project.final_deliverables or {}), settings)
-    llm_router = LLMRouter(db)
     workspace_info = await initialize_project_workspace(
         root_path=settings.root_path,
         project_id=project.id,
         project_title=project.title,
         deliverables={**deliverables, "input_text": project.input_text},
-        llm_router=llm_router,
     )
     deliverables[IMPLEMENTATION_WORKSPACE_KEY] = workspace_info
     pipeline = dict(deliverables.get(IMPLEMENTATION_PIPELINE_KEY) or {})
@@ -658,18 +656,6 @@ async def start_technical_design(
     project.final_deliverables = deliverables
     await db.commit()
     await db.refresh(project)
-
-    try:
-        await refresh_project_workspace_documents(
-            project_dir=workspace_info["project_dir"],
-            project_id=project.id,
-            project_title=project.title,
-            input_text=project.input_text,
-            deliverables=dict(project.final_deliverables or {}),
-            db=db,
-        )
-    except Exception:
-        pass
 
     await publish_project_event(project_id, {
         "type": "employee_message",
