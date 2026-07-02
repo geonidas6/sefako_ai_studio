@@ -619,7 +619,7 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
 
             await emit("agent_start", agent=agent_key, round=1)
             await speak(agent_key, "lead", f"Mission reçue. L'équipe {profiles[agent_key]['label']} démarre l'analyse du besoin et prépare ses hypothèses.", 1, "system_step")
-            await speak(agent_key, "reviewer", "Je surveille les angles morts et je prépare les points à challenger au round suivant.", 1, "system_step")
+            await speak(agent_key, "reviewer", "Je réfléchis à ce qui est proposé et je prépare les points à analyser au round suivant.", 1, "system_step")
             try:
                 result = await llm_router.generate(
                     make_r1_prompt(await enriched_input(state), agent_key),
@@ -629,7 +629,7 @@ Tu dois tenir compte de cette mémoire et continuer le travail sans répéter in
                 await persist_project_field(state["project_id"], fields[agent_key], result)
                 await emit("agent_complete", agent=agent_key, round=1, preview=result[:200], content=result)
                 await speak(agent_key, "lead", f"Analyse initiale prête :\n\n{result}", 1, "result")
-                await speak(agent_key, "reviewer", "Je transmets cette proposition aux autres départements pour critique contradictoire.", 1, "system_step")
+                await speak(agent_key, "reviewer", "Je transmets cette proposition aux autres départements pour réflexion.", 1, "system_step")
                 return result
             except Exception as e:
                 await emit("agent_error", agent=agent_key, round=1, error=str(e))
